@@ -1,0 +1,37 @@
+{
+  "name": "telem",
+  "version": "0.1.3",
+  "description": "Telem web search and page fetch for Codex.",
+  "author": {
+    "name": "TelemAI",
+    "url": "https://telem.ai"
+  },
+  "homepage": "https://telem.ai",
+  "repository": "https://github.com/TelemAI/codex-plugin",
+  "license": "Apache-2.0",
+  "keywords": [
+    "search",
+    "web-search",
+    "telem",
+    "research",
+    "fetch"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Telem",
+    "shortDescription": "Multi-provider web search and page fetch.",
+    "longDescription": "Telem routes web search across multiple providers and returns normalized, provider-attributed results. This plugin adds the Telem usage skill and sends query lineage with each call. The Telem MCP server itself is configured in config.toml by `npm create @telemai`.",
+    "developerName": "TelemAI",
+    "category": "Research",
+    "capabilities": [
+      "Search",
+      "Read"
+    ],
+    "websiteURL": "https://telem.ai",
+    "defaultPrompt": [
+      "Search the web for the latest on this topic.",
+      "Find and read the primary sources for this claim.",
+      "Compare what three independent sources say about this."
+    ]
+  }
+}

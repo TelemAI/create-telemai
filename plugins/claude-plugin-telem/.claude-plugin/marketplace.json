@@ -1,0 +1,11 @@
+{
+  "name": "telem",
+  "owner": { "name": "TelemAI" },
+  "plugins": [
+    {
+      "name": "telem",
+      "source": "./",
+      "description": "Telem web search and page fetch for Claude Code."
+    }
+  ]
+}

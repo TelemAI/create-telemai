@@ -1,0 +1,45 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__plugin_.*telem.*__telem_(search|fetch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/lineage.mjs\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/window.mjs\" session-start"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/window.mjs\" pre-compact"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/window.mjs\" post-compact"
+          }
+        ]
+      }
+    ]
+  }
+}

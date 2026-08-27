@@ -1,0 +1,23 @@
+{
+  // Same stance as config-core: every file here runs straight through `node --test`
+  // type stripping, so `npm test` works in a fresh checkout with NOTHING installed.
+  // The devDependencies (@clack/prompts, esbuild) are needed only by `npm run build`.
+  //
+  // `erasableSyntaxOnly` is load-bearing for the same reason it is there: it rejects
+  // enums, namespaces and parameter properties — the TypeScript node CANNOT strip —
+  // and this package imports config-core's source directly, so both halves must obey
+  // the same rule or the import stops resolving identically across node/esbuild.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "config-core/**/*.ts"]
+}

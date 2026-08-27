@@ -1,0 +1,22 @@
+{
+  "name": "telem",
+  "version": "0.1.4",
+  "description": "Telem web search and page fetch for Claude Code.",
+  "mcpServers": {
+    "telem": {
+      "type": "http",
+      "url": "https://mcp.telem.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.TELEM_API_KEY}"
+      }
+    }
+  },
+  "userConfig": {
+    "TELEM_API_KEY": {
+      "type": "string",
+      "title": "Telem API key",
+      "required": true,
+      "description": "Telem API key (tlm_...). Stored in this plugin's config directory. Get one at https://app.telem.ai."
+    }
+  }
+}

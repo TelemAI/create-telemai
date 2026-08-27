@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^mcp__telem__telem_(search|fetch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/telem-reasoning.mjs\"",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}

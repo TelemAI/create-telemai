@@ -1,0 +1,39 @@
+{
+  "name": "@telemai/create",
+  "version": "0.1.15",
+  "description": "Guided installer for Telem web search: npm create @telemai — wires the Search and Fetch tools into your coding agents. Detects your agent hosts, verifies your key, writes the unified .telem config, and installs each surface.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "create-telemai": "dist/index.js",
+    "create": "dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "plugins",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "smoke": "node dist/index.js --help",
+    "test": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@clack/prompts": "^1.7.0",
+    "@types/node": "^22.20.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.9.3"
+  }
+}

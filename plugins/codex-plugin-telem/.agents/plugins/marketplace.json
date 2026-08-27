@@ -1,0 +1,20 @@
+{
+  "name": "telem",
+  "interface": {
+    "displayName": "Telem"
+  },
+  "plugins": [
+    {
+      "name": "telem",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Research"
+    }
+  ]
+}
