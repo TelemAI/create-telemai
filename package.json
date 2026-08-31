@@ -1,6 +1,6 @@
 {
   "name": "@telemai/create",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "Guided installer for Telem web search: npm create @telemai — wires the Search and Fetch tools into your coding agents. Detects your agent hosts, verifies your key, writes the unified .telem config, and installs each surface.",
   "type": "module",
   "license": "Apache-2.0",

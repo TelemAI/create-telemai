@@ -82,8 +82,21 @@ export const SEARCH_PROVIDERS: readonly string[] = [
   "you",
 ]
 
-/** Pre-checked on the provider screen: the pair that covers most queries cheaply. */
-export const DEFAULT_PROVIDER_PICKS: readonly string[] = ["exa", "brave"]
+/**
+ * Pre-checked on the provider screen: the deployment's own fast default roster
+ * (seven sub-1.4s providers), so opening "choose specific" starts from what runs
+ * by default and the user trims rather than rebuilds. serpapi and linkup are the
+ * two left out for latency; they are still one checkbox away.
+ */
+export const DEFAULT_PROVIDER_PICKS: readonly string[] = [
+  "exa",
+  "tavily",
+  "brave",
+  "parallel",
+  "ceramic",
+  "seltz",
+  "you",
+]
 
 const INPUT_HINTS: Record<CoercionClass, string> = {
   name: "one name, or empty to leave unset",
