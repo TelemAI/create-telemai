@@ -297,16 +297,6 @@ export function readConfigOptions(cwd, env = process.env, warn = warnToStderr, b
           "envelope; the rest of the resolved search options still apply.",
       );
     }
-    // The hosted allowlist drops a whole block that carries a key it does not list.
-    // Remove this strip once the hosted server accepts max_routing_providers.
-    if (Object.prototype.hasOwnProperty.call(block, "max_routing_providers")) {
-      delete block.max_routing_providers;
-      warn(
-        "[telem] ignoring TELEM_MAX_ROUTING_PROVIDERS: the hosted MCP transport does not " +
-          "carry max_routing_providers yet, so it is stripped from the lineage envelope; " +
-          "the rest of the resolved search options still apply.",
-      );
-    }
     if (Object.keys(block).length === 0) return undefined;
     const bytes = Buffer.byteLength(JSON.stringify(block), "utf8");
     if (bytes > OPTIONS_MAX_BYTES) {
