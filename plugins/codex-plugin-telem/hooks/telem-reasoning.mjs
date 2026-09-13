@@ -121,6 +121,15 @@ function readConfigOptions(cwd, env = process.env) {
           "options still apply.",
       );
     }
+    // The hosted allowlist drops a whole block that carries a key it does not list.
+    // Remove this strip once the hosted server accepts max_routing_providers.
+    if (Object.prototype.hasOwnProperty.call(block, "max_routing_providers")) {
+      delete block.max_routing_providers;
+      warn(
+        "[telem] ignoring TELEM_MAX_ROUTING_PROVIDERS: max_routing_providers is not carried " +
+          "over the hosted options channel yet; the other resolved options still apply.",
+      );
+    }
     if (!Object.keys(block).length) return undefined;
     const bytes = Buffer.byteLength(JSON.stringify(block), "utf8");
     if (bytes > OPTIONS_BLOCK_MAX_BYTES) {
