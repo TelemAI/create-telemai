@@ -36,6 +36,12 @@ export type Question = {
  */
 export const SUGGESTIONS: Record<string, readonly string[]> = {
   tier: ["minimalist", "default", "extended", "max"],
+  // The KEY accepts accuracy, latency and search_cost — its description says so, and
+  // every reader forwards all three. The INSTALLER offers only the mode that is
+  // deployed today; the other two land here as one more entry each when they ship.
+  // `interview.test.ts` pins this list exactly rather than against the description,
+  // because the description deliberately enumerates more than the wizard offers.
+  autoRouting: ["accuracy"],
 }
 
 /**
@@ -47,7 +53,28 @@ export const SUGGESTIONS: Record<string, readonly string[]> = {
  * per-provider request parameters cost six screens of "leave unset" for nothing.
  * `interview.test.ts` pins these against the table, so a rename fails loudly.
  */
-export const WIZARD_KEYS: readonly string[] = ["tier", "providersInclude", "fullContent"]
+export const WIZARD_KEYS: readonly string[] = [
+  "tier",
+  "providersInclude",
+  "fullContent",
+  "autoRouting",
+]
+
+/**
+ * What each routing mode does, in the user's terms. The keys are exactly
+ * `SUGGESTIONS.autoRouting` (pinned by a test). "Off" is not a mode — it is the
+ * ABSENCE of the key, which is why it carries no entry here.
+ */
+export const AUTO_ROUTING_LABELS: Record<string, string> = {
+  accuracy: "accuracy — Telem picks the providers that answer each search best",
+}
+
+/**
+ * The wizard's and the flag's spelling for "no routing mode". It is not a value the
+ * key takes — it is the key's ABSENCE — so it lives here rather than in SUGGESTIONS,
+ * which the drift guard reads as the vocabulary the server serves.
+ */
+export const OFF_VALUE = "off"
 
 /**
  * What each tier actually costs the user, in the user's terms. The keys are exactly

@@ -80,8 +80,10 @@ import type { Flags } from "./flags.ts"
 import { HELP_TEXT, ignoredInteractiveFlags, missingRequiredFlags, parseFlags } from "./flags.ts"
 import type { Question } from "./interview.ts"
 import {
+  AUTO_ROUTING_LABELS,
   DEFAULT_PROVIDER_PICKS,
   DEFAULT_TIER,
+  OFF_VALUE,
   SEARCH_PROVIDERS,
   SUGGESTIONS,
   TIER_LABELS,
@@ -473,9 +475,15 @@ async function drive(
 
   // ---- options interview --------------------------------------------------
   const existingUser = safeJson(ports.readText(userPath))
-  const answers = interactive
-    ? await askOptions(ui as Ui, (existingUser ?? {}) as Record<string, unknown>)
+  const answers: Record<string, unknown> = interactive
+    ? await askOptions(ui as Ui, (existingUser ?? {}) as Record<string, unknown>, flags.autoRouting)
     : {}
+  // The flag is the non-interactive API for the same screen, so it works with --yes
+  // AND overrides the wizard when both spoke: it is the more explicit instruction.
+  // "off" is present-and-undefined, which REMOVES the key rather than writing a value.
+  if (flags.autoRouting !== undefined) {
+    answers.autoRouting = flags.autoRouting === OFF_VALUE ? undefined : flags.autoRouting
+  }
 
   const userMerge = mergeTelemConfig(ports.readText(userPath), answers, userPath)
   if (userMerge.status === "abort") {
@@ -507,7 +515,13 @@ async function drive(
         home: ports.env.HOME ?? ports.env.USERPROFILE ?? "",
         projectRoot: project?.root,
       }),
-      Object.keys(answers).filter((key) => answers[key] !== undefined),
+      // A key the user explicitly REMOVED counts as answered: a legacy file that
+      // still sets it outranks the removal, so "off" would otherwise report success
+      // while routing stayed on. Scoped to autoRouting, the key with an explicit
+      // off; removals on the other screens stay hidden (see the PR's follow-up).
+      Object.keys(answers)
+        .filter((key) => answers[key] !== undefined)
+        .concat("autoRouting" in answers && answers.autoRouting === undefined ? ["autoRouting"] : []),
     ),
   )
 
@@ -2341,7 +2355,13 @@ const UNSET_LABEL = "leave unset"
  * Every answer still travels through the SHIPPED coercers via `answerToValue`, so a
  * value this screen accepts is a value every reader resolves.
  */
-async function askOptions(ui: Ui, existing: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function askOptions(
+  ui: Ui,
+  existing: Record<string, unknown>,
+  /** Set when `--auto-routing` already decided: that screen is skipped rather than
+   *  asked and then silently overridden. */
+  presetRouting?: string,
+): Promise<Record<string, unknown>> {
   const customize = await ui.confirm({
     message: "Customize search defaults? (No = Telem's recommended defaults)",
     initialValue: false,
@@ -2406,6 +2426,47 @@ async function askOptions(ui: Ui, existing: Record<string, unknown>): Promise<Re
     // The deployment's own set: that is the ABSENCE of providersInclude, so an
     // include list left over from an earlier run is removed rather than kept.
     answers.providersInclude = undefined
+  }
+
+  // ---- autoRouting --------------------------------------------------------
+  // A select of the DEPLOYED modes plus "off", not a confirm: more modes are coming,
+  // and "off" is the absence of the key rather than a value, so it is offered as a
+  // choice and stored as `undefined`. The wizard never names a mode that is not
+  // live — the option's own description carries the full vocabulary.
+  const routingQuestion = questions.autoRouting as Question
+  const currentRouting = initialText(routingQuestion)
+  const routingModes = SUGGESTIONS.autoRouting ?? []
+  if (presetRouting !== undefined) {
+    ui.info(`auto-routing: ${presetRouting} (from --auto-routing)`)
+  }
+  // A mode this installer cannot offer is still the user's setting: `latency` on a
+  // self-hosted deployment, or a value a newer version wrote. Show it as its own
+  // choice and start the cursor there, so pressing Enter through this screen keeps
+  // it. Without this the picker defaulted to Off and SILENTLY deleted it.
+  const unofferable = currentRouting && !routingModes.includes(currentRouting) ? [currentRouting] : []
+  const routing = presetRouting !== undefined ? presetRouting : await ui.select({
+    message: "Let Telem choose which providers run each search? (auto-routing)",
+    options: [
+      { value: OFF_VALUE, label: "Off — the providers above run every search" },
+      ...routingModes.map((value) => ({ value, label: AUTO_ROUTING_LABELS[value] ?? value })),
+      ...unofferable.map((value) => ({ value, label: `${value} — your current setting, kept as it is` })),
+    ],
+    initialValue: [...routingModes, ...unofferable].includes(currentRouting) ? currentRouting : OFF_VALUE,
+    })
+  if (routing === OFF_VALUE) {
+    // Present-and-undefined REMOVES the key, so turning it off clears a mode an
+    // earlier run wrote rather than leaving it in place.
+    answers.autoRouting = undefined
+    if (currentRouting) ui.info(`${UNSET_LABEL} — auto-routing is off`)
+  } else if (unofferable.includes(routing)) {
+    // Their own value, kept verbatim. It deliberately bypasses `answerToValue`,
+    // whose suggestion gate rejects anything this installer does not offer — the
+    // KEY accepts it and it is already in their file, so keeping it must not depend
+    // on what this version happens to know about.
+    answers.autoRouting = routing
+  } else {
+    const routingAnswer = answerToValue(routingQuestion, routing)
+    answers.autoRouting = routingAnswer.ok ? routingAnswer.value : undefined
   }
 
   // ---- fullContent --------------------------------------------------------

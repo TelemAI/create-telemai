@@ -5,8 +5,12 @@
 // Pure: no process, no env, no IO. `parseFlags` never throws; it returns errors so
 // the caller can print all of them at once instead of one per run.
 
+import { OFF_VALUE, SUGGESTIONS } from "./interview.ts"
 import type { SurfaceId } from "./surfaces.ts"
 import { SURFACE_IDS } from "./surfaces.ts"
+
+/** What `--auto-routing` accepts: the modes the wizard offers, plus "off". */
+export const AUTO_ROUTING_CHOICES: readonly string[] = [...(SUGGESTIONS.autoRouting ?? []), OFF_VALUE]
 
 export type Flags = {
   yes: boolean
@@ -14,6 +18,8 @@ export type Flags = {
   login: boolean
   baseUrl?: string
   keyEnv?: string
+  /** A routing mode to write, or "off" to remove one. Absent means the flag was not passed. */
+  autoRouting?: string
   json: boolean
   dryRun: boolean
   project: boolean
@@ -52,7 +58,7 @@ const EMPTY: Flags = {
 }
 
 /** Flags that take a value, in both `--flag value` and `--flag=value` spellings. */
-const VALUE_FLAGS = new Set(["--client", "--base-url", "--key-env"])
+const VALUE_FLAGS = new Set(["--client", "--base-url", "--key-env", "--auto-routing"])
 
 export function parseFlags(argv: readonly string[]): ParsedFlags {
   const flags: Flags = { ...EMPTY, clients: [] }
@@ -98,6 +104,13 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
           errors.push(`--base-url must be an http(s) URL; got ${value}`)
         } else {
           flags.baseUrl = trimmed
+        }
+      } else if (name === "--auto-routing") {
+        const trimmed = value.trim().toLowerCase()
+        if (!AUTO_ROUTING_CHOICES.includes(trimmed)) {
+          errors.push(`unknown --auto-routing ${value}; valid: ${AUTO_ROUTING_CHOICES.join(", ")}`)
+        } else {
+          flags.autoRouting = trimmed
         }
       } else {
         const trimmed = value.trim()
@@ -223,6 +236,10 @@ Flags (they double as the non-interactive API):
   --base-url <url>              Telem deployment to configure and verify against
   --key-env <VAR>               read the API key from this environment variable
                                 instead of prompting (the CI path)
+  --auto-routing <mode>         let Telem choose the providers for each search:
+                                ${AUTO_ROUTING_CHOICES.join(" | ")}. "off" removes a
+                                mode an earlier run wrote. accuracy is available now;
+                                latency and search_cost routing are coming shortly
   --project                     also write <cwd>/.telem/telem.json
   --codex-disable-web-search    also set web_search = "disabled" in Codex's config
   --no-codex-reasoning          skip the Codex telem plugin (reasoning hook AND
