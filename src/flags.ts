@@ -238,8 +238,10 @@ Flags (they double as the non-interactive API):
                                 instead of prompting (the CI path)
   --auto-routing <mode>         let Telem choose the providers for each search:
                                 ${AUTO_ROUTING_CHOICES.join(" | ")}. "off" removes a
-                                mode an earlier run wrote. accuracy is available now;
-                                latency and search_cost routing are coming shortly
+                                mode an earlier run wrote. The wizard asks this as a
+                                step of its own; this flag answers it and skips it.
+                                accuracy is available now; latency and search_cost
+                                routing are coming shortly
   --project                     also write <cwd>/.telem/telem.json
   --codex-disable-web-search    also set web_search = "disabled" in Codex's config
   --no-codex-reasoning          skip the Codex telem plugin (reasoning hook AND

@@ -2362,18 +2362,72 @@ async function askOptions(
    *  asked and then silently overridden. */
   presetRouting?: string,
 ): Promise<Record<string, unknown>> {
-  const customize = await ui.confirm({
-    message: "Customize search defaults? (No = Telem's recommended defaults)",
-    initialValue: false,
-  })
-  if (!customize) return {}
-
   const questions = Object.fromEntries(
     buildInterview(existing)
       .filter((entry) => WIZARD_KEYS.includes(entry.key))
       .map((entry) => [entry.key, entry]),
   )
   const answers: Record<string, unknown> = {}
+
+  const customize = await ui.confirm({
+    message: "Customize search defaults? (No = Telem's recommended defaults)",
+    initialValue: false,
+  })
+
+  // ---- autoRouting: a step of its own -------------------------------------
+  // Asked whatever the answer above, because it is not a "default" to tune — it
+  // decides whether Telem picks the providers at all, and it was invisible to every
+  // user who took the recommended defaults. It sits here, directly after that
+  // question, so its position does not depend on the answer.
+  const routingQuestion = questions.autoRouting as Question
+  const currentRouting = initialText(routingQuestion)
+  const routingModes = SUGGESTIONS.autoRouting ?? []
+  // A mode this installer cannot offer is still the user's setting: `latency` on a
+  // self-hosted deployment, or a value a newer version wrote. It stays a choice and
+  // the cursor starts on it, so Enter keeps it rather than deleting it.
+  const unofferable = currentRouting && !routingModes.includes(currentRouting) ? [currentRouting] : []
+  // The SHAPE follows the vocabulary: one mode to offer is a yes/no question, and
+  // anything richer — a second mode, or a configured one we cannot offer — needs a
+  // list. So this becomes a select on its own the day latency and search_cost land.
+  const asList = unofferable.length > 0 || routingModes.length > 1
+  let routing: string
+  if (presetRouting !== undefined) {
+    ui.info(`auto-routing: ${presetRouting} (from --auto-routing)`)
+    routing = presetRouting
+  } else if (asList) {
+    routing = await ui.select({
+      message: "Let Telem choose which providers run each search? (auto-routing)",
+      options: [
+        { value: OFF_VALUE, label: "Off — your configured providers run every search" },
+        ...routingModes.map((value) => ({ value, label: AUTO_ROUTING_LABELS[value] ?? value })),
+        ...unofferable.map((value) => ({ value, label: `${value} — your current setting, kept as it is` })),
+      ],
+      initialValue: [...routingModes, ...unofferable].includes(currentRouting) ? currentRouting : OFF_VALUE,
+    })
+  } else {
+    const enable = await ui.confirm({
+      message: "Let Telem choose which providers run each search? (auto-routing)",
+      initialValue: routingModes.includes(currentRouting),
+    })
+    routing = enable ? (routingModes[0] as string) : OFF_VALUE
+  }
+  if (routing === OFF_VALUE) {
+    // Present-and-undefined REMOVES the key, so answering No clears a mode an
+    // earlier run wrote rather than leaving it in place.
+    answers.autoRouting = undefined
+    if (currentRouting) ui.info(`${UNSET_LABEL} — auto-routing is off`)
+  } else if (unofferable.includes(routing)) {
+    // Their own value, kept verbatim. It deliberately bypasses `answerToValue`,
+    // whose suggestion gate rejects anything this installer does not offer — the
+    // KEY accepts it and it is already in their file, so keeping it must not depend
+    // on what this version happens to know about.
+    answers.autoRouting = routing
+  } else {
+    const routingAnswer = answerToValue(routingQuestion, routing)
+    answers.autoRouting = routingAnswer.ok ? routingAnswer.value : undefined
+  }
+
+  if (!customize) return answers
   ui.note(
     "Optional tuning for every Telem search — how much detail comes back, which providers run.\n" +
       "Press Enter on each to keep Telem's defaults; you can change them later in ~/.telem/telem.json.",
@@ -2426,47 +2480,6 @@ async function askOptions(
     // The deployment's own set: that is the ABSENCE of providersInclude, so an
     // include list left over from an earlier run is removed rather than kept.
     answers.providersInclude = undefined
-  }
-
-  // ---- autoRouting --------------------------------------------------------
-  // A select of the DEPLOYED modes plus "off", not a confirm: more modes are coming,
-  // and "off" is the absence of the key rather than a value, so it is offered as a
-  // choice and stored as `undefined`. The wizard never names a mode that is not
-  // live — the option's own description carries the full vocabulary.
-  const routingQuestion = questions.autoRouting as Question
-  const currentRouting = initialText(routingQuestion)
-  const routingModes = SUGGESTIONS.autoRouting ?? []
-  if (presetRouting !== undefined) {
-    ui.info(`auto-routing: ${presetRouting} (from --auto-routing)`)
-  }
-  // A mode this installer cannot offer is still the user's setting: `latency` on a
-  // self-hosted deployment, or a value a newer version wrote. Show it as its own
-  // choice and start the cursor there, so pressing Enter through this screen keeps
-  // it. Without this the picker defaulted to Off and SILENTLY deleted it.
-  const unofferable = currentRouting && !routingModes.includes(currentRouting) ? [currentRouting] : []
-  const routing = presetRouting !== undefined ? presetRouting : await ui.select({
-    message: "Let Telem choose which providers run each search? (auto-routing)",
-    options: [
-      { value: OFF_VALUE, label: "Off — the providers above run every search" },
-      ...routingModes.map((value) => ({ value, label: AUTO_ROUTING_LABELS[value] ?? value })),
-      ...unofferable.map((value) => ({ value, label: `${value} — your current setting, kept as it is` })),
-    ],
-    initialValue: [...routingModes, ...unofferable].includes(currentRouting) ? currentRouting : OFF_VALUE,
-    })
-  if (routing === OFF_VALUE) {
-    // Present-and-undefined REMOVES the key, so turning it off clears a mode an
-    // earlier run wrote rather than leaving it in place.
-    answers.autoRouting = undefined
-    if (currentRouting) ui.info(`${UNSET_LABEL} — auto-routing is off`)
-  } else if (unofferable.includes(routing)) {
-    // Their own value, kept verbatim. It deliberately bypasses `answerToValue`,
-    // whose suggestion gate rejects anything this installer does not offer — the
-    // KEY accepts it and it is already in their file, so keeping it must not depend
-    // on what this version happens to know about.
-    answers.autoRouting = routing
-  } else {
-    const routingAnswer = answerToValue(routingQuestion, routing)
-    answers.autoRouting = routingAnswer.ok ? routingAnswer.value : undefined
   }
 
   // ---- fullContent --------------------------------------------------------
