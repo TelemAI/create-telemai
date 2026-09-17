@@ -107,13 +107,15 @@ export const SEARCH_PROVIDERS: readonly string[] = [
   "ceramic",
   "seltz",
   "you",
+  "perplexity",
+  "tinyfish",
 ]
 
 /**
  * Pre-checked on the provider screen: the deployment's own fast default roster
  * (seven sub-1.4s providers), so opening "choose specific" starts from what runs
- * by default and the user trims rather than rebuilds. serpapi and linkup are the
- * two left out for latency; they are still one checkbox away.
+ * by default and the user trims rather than rebuilds. The rest (serpapi, linkup,
+ * perplexity, tinyfish) are off by default on the router; still one checkbox away.
  */
 export const DEFAULT_PROVIDER_PICKS: readonly string[] = [
   "exa",
