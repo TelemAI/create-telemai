@@ -2,8 +2,9 @@
 //
 // The file belongs to the user, not to the wizard, so:
 //
-//  * UNMANAGED KEYS SURVIVE. Anything that is not one of the six option keys is
-//    copied through untouched, in its original order.
+//  * UNMANAGED KEYS SURVIVE. Anything that is not an option key (`TELEM_OPTIONS`)
+//    is copied through untouched, in its original order. The option keys — the
+//    ones the wizard never asks about included — are kept too, in the table's order.
 //  * INVALID EXISTING JSON ABORTS. A file we cannot parse is a file we cannot
 //    merge into, and overwriting it would destroy config we never read. The abort
 //    names the path — that is the openclaw installer's rule, applied here.

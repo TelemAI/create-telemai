@@ -45,12 +45,13 @@ export const SUGGESTIONS: Record<string, readonly string[]> = {
 }
 
 /**
- * The option keys the WIZARD asks about. The table still defines six — every one of
- * them is read from `~/.telem/telem.json` by every surface — but three of them
- * (`fields`, `providersExclude`, `providerOverrides`) are config-file-only: they are
- * refinements of an answer the wizard already collects (`tier` and
- * `providersInclude`), and asking a first-run user to type a JSON blob of raw
- * per-provider request parameters cost six screens of "leave unset" for nothing.
+ * The option keys the WIZARD asks about. The table defines more, and every one of
+ * them can be set in `~/.telem/telem.json`, but the rest are config-file-only:
+ * `fields`, `providersExclude` and `providerOverrides` are refinements of an answer
+ * the wizard already collects (`tier` and `providersInclude`), and asking a first-run
+ * user to type a JSON blob of raw per-provider request parameters cost six screens of
+ * "leave unset" for nothing; the three fetch keys (`fetchProviders`, `fetchTier`,
+ * `fetchNoCache`) are measurement and cost refinements, not first-run questions.
  * `interview.test.ts` pins these against the table, so a rename fails loudly.
  */
 export const WIZARD_KEYS: readonly string[] = [

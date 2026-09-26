@@ -107,9 +107,9 @@ the Python install.
 
 ### Options the wizard does not ask about
 
-`~/.telem/telem.json` supports six keys and every surface reads all six. The wizard
-asks about three — `tier`, `providersInclude`, `fullContent` — because the other
-three refine an answer it already has, and asking a first-run user to type a JSON
+`~/.telem/telem.json` supports ten keys. The wizard asks about four — `autoRouting`,
+`tier`, `providersInclude`, `fullContent` — and leaves the rest to the file. Three
+refine a search answer it already has, and asking a first-run user to type a JSON
 blob of raw per-provider parameters bought six screens of "leave unset":
 
 | Key | What it does | How to set it |
@@ -117,6 +117,12 @@ blob of raw per-provider parameters bought six screens of "leave unset":
 | `fields` | an explicit result-field list, instead of a `tier` | edit `~/.telem/telem.json` (or `TELEM_FIELDS`) |
 | `providersExclude` | drop providers from the set that would otherwise run | edit `~/.telem/telem.json` (or `TELEM_PROVIDERS_EXCLUDE`) |
 | `providerOverrides` | raw per-provider request parameters | edit `~/.telem/telem.json` |
+
+The other three — `fetchProviders`, `fetchTier`, `fetchNoCache` — are fetch
+options, not search ones: which providers read a page, the fetch tier, and skipping
+the shared fetch cache. They are measurement and cost refinements rather than
+first-run questions, and they take effect only on a surface that sends fetch
+options.
 
 The installer never removes a key it did not ask about, so anything you set by hand
 survives every re-run.

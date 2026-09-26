@@ -2346,11 +2346,12 @@ const UNSET_LABEL = "leave unset"
 /**
  * The search defaults, behind ONE gate.
  *
- * The table still defines six keys and every surface still reads all six — but the
- * wizard asks about three (`WIZARD_KEYS`), and only when the user says yes. Six
- * screens that every captured first run answered "leave unset" was six screens of
- * nothing; the refinements (`fields`, `providersExclude`, `providerOverrides`) stay
- * fully supported in `~/.telem/telem.json` where the people who want them live.
+ * The table defines more keys than the wizard asks about (`WIZARD_KEYS`): behind this
+ * gate it asks three, and only when the user says yes, with `autoRouting` as a step of
+ * its own. Six screens that every captured first run answered "leave unset" was six
+ * screens of nothing; the refinements (`fields`, `providersExclude`,
+ * `providerOverrides`) and the fetch keys (`fetchProviders`, `fetchTier`,
+ * `fetchNoCache`) stay in `~/.telem/telem.json` where the people who want them live.
  *
  * Every answer still travels through the SHIPPED coercers via `answerToValue`, so a
  * value this screen accepts is a value every reader resolves.

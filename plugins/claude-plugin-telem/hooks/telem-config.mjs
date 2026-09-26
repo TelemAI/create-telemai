@@ -1,13 +1,13 @@
 // Vendored unified Telem config reader for the claude-plugin PreToolUse hook.
 // Zero-dependency Node ESM.
 //
-// PROVENANCE — everything below the imports is a byte-identical copy of the
-// config block of the pi skill's vendored reader (lines
-// ≈49-435: the reader, the three composition rules — `composeTierFields`,
+// PROVENANCE — everything below the imports is a copy of the config block of
+// the pi skill's vendored reader, identical in logic (the
+// reader, the three composition rules — `composeTierFields`,
 // `composeProviders`, `guardProviderOverrides`, applied in that order because
-// each decides what the next sees — and `searchBlockFromConfig`), per the
-// hosted-options spec the design notes
-// It deliberately EXCLUDES `readCredentials` (telem-common.mjs:444-456 — the
+// each decides what the next sees — the search and fetch block builders,
+// `blocksFromConfig`, `searchBlockFromConfig` and `fetchBlockFromConfig`).
+// It deliberately EXCLUDES `readCredentials` (in telem-common.mjs — the
 // hook has no use for the API key; auth rides the MCP server headers, never the
 // hook) and every pi post/render helper. It is VENDORED, not imported, because
 // this plugin directory is standalone by contract: it is copied out of the
@@ -23,9 +23,10 @@
 // WHAT KEEPS THIS COPY HONEST: its own suite runs the SHARED
 // CONFORMANCE CORPUS (the shared config contract) through the functions
 // below, diffs them against config-core's own `resolveOptions` on the same
-// materialized trees, runs the shared the shared config contract corpus
-// through `searchBlockFromConfig`, and diffs that against `layers.ts`'s
-// `resolveHarnessOptions` — so a config-core change that is not ported here
+// materialized trees, runs the shared search-block cases through
+// `searchBlockFromConfig`, diffs that against `layers.ts`'s
+// `resolveHarnessOptions`, and runs the shared fetch-block cases through
+// `fetchBlockFromConfig` — so a config-core change that is not ported here
 // fails loudly, never silently. A behavior change still belongs in a fixture
 // FIRST, then in all five implementations.
 //
@@ -102,7 +103,10 @@ function asOverridesMap(value) {
 
 const COERCERS = { name: asName, nameList: asNameList, flag: asFlag, overridesMap: asOverridesMap }
 
-/** The six option keys of spec `envAliases` are deprecated, read strictly below `env`. */
+/**
+ * The option keys: the search keys, then the three fetch keys. `envAliases` are
+ * deprecated, read strictly below `env`.
+ */
 const TELEM_OPTIONS = [
   { key: "tier", coercion: "name", env: "TELEM_TIER", envAliases: [] },
   { key: "fields", coercion: "nameList", env: "TELEM_FIELDS", envAliases: [] },
@@ -117,6 +121,10 @@ const TELEM_OPTIONS = [
   // No env form on purpose: a JSON blob in a shell variable is not a config surface.
   { key: "providerOverrides", coercion: "overridesMap", env: null, envAliases: [] },
   { key: "autoRouting", coercion: "name", env: "TELEM_AUTO_ROUTING", envAliases: [] },
+  // The fetch keys: resolved like every other key, sent only by the fetch builder below.
+  { key: "fetchProviders", coercion: "nameList", env: "TELEM_FETCH_PROVIDERS", envAliases: [] },
+  { key: "fetchTier", coercion: "name", env: "TELEM_FETCH_TIER", envAliases: [] },
+  { key: "fetchNoCache", coercion: "flag", env: "TELEM_FETCH_NO_CACHE", envAliases: [] },
 ]
 
 /** The one key whose env var outranks the files; every other key is file-beats-env. */
@@ -405,25 +413,41 @@ function guardProviderOverrides(values, warnings) {
 }
 
 /**
- * The resolved options plus the two composition rules, ready to render.
+ * Apply the three composition rules to a COPY of one resolution's values, so the
+ * same resolution can still feed the fetch builder untouched. Returns the composed
+ * values and ONLY the composition warnings — the reader's are the caller's to say.
+ */
+function composeSearchValues(resolved) {
+  const values = { ...resolved.values }
+  const warnings = []
+  composeTierFields(values, resolved.sources, warnings)
+  composeProviders(values, warnings)
+  guardProviderOverrides(values, warnings)
+  return { values, warnings }
+}
+
+/**
+ * The resolved options plus the composition rules, ready to render.
  * `{ values, sources, warnings }` — warnings are for STDERR, never for stdout,
  * which is what an agent reads as the search result.
  */
 export function resolveSkillOptions(env = process.env, projectRoot = undefined) {
   const resolved = resolveConfigOptions(env, projectRoot)
-  composeTierFields(resolved.values, resolved.sources, resolved.warnings)
-  composeProviders(resolved.values, resolved.warnings)
-  guardProviderOverrides(resolved.values, resolved.warnings)
-  return resolved
+  const composed = composeSearchValues(resolved)
+  return {
+    ...resolved,
+    values: composed.values,
+    warnings: [...resolved.warnings, ...composed.warnings],
+  }
 }
 
 /**
- * The V2 `search` block for the unified config, or null when nothing is
+ * The SEARCH builder: the composition rules (their warnings through `warn`), the
+ * env-only routing keys, and the V2 `search` block — or null when nothing is
  * configured (an absent block means "server defaults", the common case).
- * Warnings go to stderr here — the caller gets a clean block.
  */
-export function searchBlockFromConfig(env = process.env, projectRoot = undefined, warn = console.error) {
-  const { values, warnings } = resolveSkillOptions(env, projectRoot)
+function buildSearchBlock(resolved, env, warn) {
+  const { values, warnings } = composeSearchValues(resolved)
   for (const warning of warnings) warn(warning)
   const block = {}
   if (values.tier !== undefined) block.tier = values.tier
@@ -445,4 +469,88 @@ export function searchBlockFromConfig(env = process.env, projectRoot = undefined
   const topic = env.TELEM_TOPIC?.trim()
   if (topic) block.topic = topic
   return Object.keys(block).length ? block : null
+}
+
+/**
+ * The FETCH builder: `fetchProviders` / `fetchTier` / `fetchNoCache` become the
+ * fetch block's `providers` / `tier` / `no_cache`, in that key order — or null
+ * when none resolved. It says nothing of its own and validates nothing: provider
+ * and tier names are the router's to judge. Its one transformation is lowercasing
+ * `tier` (fetch tiers are case-insensitive), which is normalization, not
+ * validation — an unknown tier is still sent, and the router rejects it. Provider
+ * names go as written (the router normalizes those itself), and `no_cache` as
+ * resolved, so a file's `false` is sent as `false`.
+ */
+function buildFetchBlock(resolved) {
+  const { values } = resolved
+  const block = {}
+  if (values.fetchProviders !== undefined) block.providers = [...values.fetchProviders]
+  if (values.fetchTier !== undefined) block.tier = values.fetchTier.toLowerCase()
+  if (values.fetchNoCache !== undefined) block.no_cache = values.fetchNoCache
+  return Object.keys(block).length ? block : null
+}
+
+/** What `blocksFromConfig` builds, by block name. */
+const DEFAULT_BUILDERS = Object.freeze({ search: buildSearchBlock, fetch: buildFetchBlock })
+
+/** Resolution, then the READER's warnings (a bad file, a refused relocation) — once. */
+function resolveAndWarn(env, projectRoot, warn) {
+  const resolved = resolveConfigOptions(env, projectRoot)
+  for (const warning of resolved.warnings) warn(warning)
+  return resolved
+}
+
+/** Run one builder so that its throw costs only its own block: null, plus one warning. */
+function buildIsolated(name, builder, resolved, env, warn) {
+  try {
+    return builder(resolved, env, warn)
+  } catch (error) {
+    warn(
+      `[telem] ignoring the ${name} options in the Telem config: building them failed ` +
+        `(${error?.message || String(error)}), so this call carries none.`,
+    )
+    return null
+  }
+}
+
+/**
+ * Both blocks from ONE resolution: `{ search, fetch }`, each a block or null.
+ *
+ * - A RESOLUTION throw propagates: both blocks are lost, and the caller decides.
+ * - A BUILDER throw costs only that builder's block — null, plus one warning.
+ * - The reader's warnings print once, before either builder runs; the search
+ *   builder then prints its composition warnings, and the fetch builder none.
+ *
+ * `builders` is a test seam, not a caller option: an entry replaces the default
+ * builder of the same name.
+ */
+export function blocksFromConfig(
+  env = process.env,
+  projectRoot = undefined,
+  warn = console.error,
+  builders = DEFAULT_BUILDERS,
+) {
+  const resolved = resolveAndWarn(env, projectRoot, warn)
+  const use = { ...DEFAULT_BUILDERS, ...builders }
+  return {
+    search: buildIsolated("search", use.search, resolved, env, warn),
+    fetch: buildIsolated("fetch", use.fetch, resolved, env, warn),
+  }
+}
+
+/**
+ * The V2 `search` block alone: resolution plus the search builder, with NO catch —
+ * a throw propagates (the pi skill's `search.mjs` exits non-zero on one). Warnings
+ * go to stderr here — the caller gets a clean block.
+ */
+export function searchBlockFromConfig(env = process.env, projectRoot = undefined, warn = console.error) {
+  return buildSearchBlock(resolveAndWarn(env, projectRoot, warn), env, warn)
+}
+
+/**
+ * The fetch block alone: resolution plus the fetch builder, with no catch. The
+ * shared fetch-block conformance cases run through this.
+ */
+export function fetchBlockFromConfig(env = process.env, projectRoot = undefined, warn = console.error) {
+  return buildFetchBlock(resolveAndWarn(env, projectRoot, warn), env, warn)
 }
