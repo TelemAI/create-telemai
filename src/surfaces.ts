@@ -21,6 +21,7 @@ export type SurfaceId =
   | "codex"
   | "pi"
   | "openclaw"
+  | "hermes"
   | "claude-skill"
   | "mcp-json"
 
@@ -105,6 +106,16 @@ export const SURFACES: readonly Surface[] = [
     needsPython: false,
   },
   {
+    id: "hermes",
+    label: "Hermes",
+    group: "Agent hosts",
+    probe: "hermes",
+    hint: "Adds Telem search to Hermes Agent",
+    // Hermes installs telem-sdk into its OWN managed environment when the plugin is
+    // enabled, so nothing Python-side is needed on this machine.
+    needsPython: false,
+  },
+  {
     id: "claude-skill",
     hiddenFromPicker: true,
     label: "Claude Agent Skill (needs Python)",
@@ -146,6 +157,8 @@ export function surfaceGroups(): { group: SurfaceGroup; surfaces: Surface[] }[] 
 export const OPENCODE_PLUGIN_PACKAGE = "@telemai/opencode-plugin"
 export const PI_PACKAGE = "@telemai/pi-telem"
 export const OPENCLAW_PACKAGE = "@telemai/openclaw-plugin"
+/** The Hermes plugin is a git repository, not a package: `hermes plugins install` clones it. */
+export const HERMES_PLUGIN_REPO = "TelemAI/hermes-plugin"
 /** The pip distribution behind every Python surface. The base package: the only Python
  *  surface is the Claude Agent Skill, whose `telem-install-skill` ships in it. The `[mcp]`
  *  extra is gone from telem-sdk — asking for it would fail the install outright. */

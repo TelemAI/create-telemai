@@ -231,7 +231,8 @@ Flags (they double as the non-interactive API):
                                 install
   --client <name>               tool to install into; repeatable or comma-separated
                                 one or more of:
-                                ${SURFACE_IDS.join(", ")}
+                                ${SURFACE_IDS.slice(0, 4).join(", ")},
+                                ${SURFACE_IDS.slice(4).join(", ")}
   --login                       credentials only: verify a key, write it, exit
   --base-url <url>              Telem deployment to configure and verify against
   --key-env <VAR>               read the API key from this environment variable

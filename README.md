@@ -18,7 +18,7 @@ OpenCode itself is a Bun binary.
 
 ## What it does
 
-1. **Detects** which of `opencode`, `claude`, `codex`, `pi`, `openclaw`, and the
+1. **Detects** which of `opencode`, `claude`, `codex`, `pi`, `openclaw`, `hermes`, and the
    Python toolchain (`python3`/`pip`/`uv`, `telem-mcp`) are on your PATH.
 2. **Asks which tools** to install into, grouped. Every tool in the catalog is
    listed, always: the ones this machine has are pre-checked and sorted first, and
@@ -91,6 +91,7 @@ prints just before it asks for the key.
 | `codex` | points `[mcp_servers.telem]` in `~/.codex/config.toml` at the hosted MCP (url + auth header), then `codex plugin marketplace add TelemAI/codex-plugin` + `codex plugin add telem@telem` for the reasoning hook and the telem skill. Codex skips an untrusted plugin hook *silently* and has no CLI to trust one, so the installer also pre-grants that hook's trust in `config.toml`. An existing stdio table is left exactly as it is — the local server it starts is deprecated, and nothing rewrites a table this installer did not write; an *older hand-written* reasoning hook under `~/.codex/hooks/` is replaced only with your consent (`--codex-migrate-hooks`) — without it the plugin is not installed, because both hooks would fire on every search — and if this run *cannot* install the plugin (no `codex` on PATH, no plugin source), the old hook is left exactly as it is and the surface is reported `manual` rather than installed. `web_search = "disabled"` only with your consent. Needs no local `telem-mcp`. |
 | `pi` | `pi install npm:@telemai/pi-telem` |
 | `openclaw` | `openclaw plugins install npm:@telemai/openclaw-plugin --force` + `openclaw config set tools.alsoAllow` (merged with whatever it already allows, because `config set` replaces the array). The wizard owns the version gate: openclaw below `2026.7.1` cannot load the plugin and is refused rather than "installed" into. It does **not** delegate to `telem-openclaw-setup` — that is a source-checkout dev tool (`npm ci` + `--link`), and the published tarball has no lockfile for `npm ci`. |
+| `hermes` | `hermes plugins install TelemAI/hermes-plugin --yes-deps --enable`: Hermes clones the plugin and installs `telem-sdk` into its own managed environment. On a re-run, when `~/.hermes/plugins/telem` (or `$HERMES_HOME/plugins/telem`) already exists, only `hermes plugins enable telem`. The key comes from `~/.telem/credentials.json`, like every surface. |
 | `claude-skill` | `telem-install-skill` |
 | `mcp-json` | prints a ready-to-paste `mcpServers` snippet for the **hosted** server (`https://mcp.telem.ai/mcp` + an `Authorization: Bearer` header). Nothing local is spawned, so it needs no Python; paste your own key from `~/.telem/credentials.json` — the installer never prints it |
 

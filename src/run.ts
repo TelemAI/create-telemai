@@ -110,6 +110,7 @@ import {
   MCP_COMMAND,
   PYTHON_PROBE,
   OPENCLAW_PACKAGE,
+  HERMES_PLUGIN_REPO,
   OPENCODE_PLUGIN_PACKAGE,
   PI_PACKAGE,
   PYTHON_PACKAGE,
@@ -772,6 +773,9 @@ async function planSurfaces(
       case "openclaw":
         planOpenclaw(ports, plan, tools)
         break
+      case "hermes":
+        planHermes(ports, plan, tools, home)
+        break
       case "claude-skill":
         planClaudeSkill(plan, tools)
         break
@@ -1408,6 +1412,31 @@ async function planCodexPlugin(
   ]
   changes.push(`install the ${CODEX_PLUGIN_REF} Codex plugin`)
   return { status: "ok", hookTrust, commands, writes, removals, notes, changes }
+}
+
+function planHermes(ports: Ports, plan: Plan, tools: Record<string, ToolInfo>, home: string): void {
+  // Hermes has no config-file route like opencode's: a plugin must be cloned into its
+  // plugins dir and its Python dependencies admitted into Hermes's managed environment,
+  // and only `hermes plugins install` does both. `--yes-deps --enable` answers the two
+  // consent prompts up front, which a non-TTY run cannot answer.
+  const install = ["hermes", "plugins", "install", HERMES_PLUGIN_REPO, "--yes-deps", "--enable"]
+  const enable = ["hermes", "plugins", "enable", "telem"]
+  if (!tools.hermes?.path) {
+    plan.notes.push(notOnPathNote("hermes", "hermes", [install]))
+    setOutcome(plan, "hermes", "manual", "hermes is not on PATH; command printed below")
+    return
+  }
+  // Re-run: install refuses an existing plugin dir without --force, and a reinstall
+  // would re-clone for nothing. `enable` is idempotent and asks no question.
+  const hermesHome = (ports.env.HERMES_HOME ?? "").trim() || join(home, ".hermes")
+  const argv = ports.exists(join(hermesHome, "plugins", "telem")) ? enable : install
+  plan.commands.push({
+    surface: "hermes",
+    argv,
+    reason: argv === install ? `install ${HERMES_PLUGIN_REPO} as a Hermes plugin` : "make sure the installed telem Hermes plugin is enabled",
+    optional: false,
+  })
+  setOutcome(plan, "hermes", "installed", argv.join(" "))
 }
 
 function planPi(plan: Plan, tools: Record<string, ToolInfo>): void {
