@@ -149,9 +149,10 @@ The flags are the non-interactive API. On a non-TTY — a pipe, `CI=true`, or
 --base-url <url>              Telem deployment to configure and verify against
 --key-env <VAR>               read the API key from this env var instead of prompting
 --auto-routing <mode>         let Telem choose the providers for each search:
-                              accuracy | off. "off" removes a mode an earlier run
-                              wrote. The wizard asks this as a step of its own; this
-                              flag answers it and skips it. accuracy is available
+                              accuracy | off. On (accuracy) by default; "off" turns
+                              it off and is kept on later runs. The wizard asks this
+                              as a step of its own; this flag answers it and skips
+                              it. accuracy is available
                               now; latency and search_cost routing are coming shortly
 --project                     also write <cwd>/.telem/telem.json
 --codex-disable-web-search    also set web_search = "disabled" in Codex's config

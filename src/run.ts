@@ -481,9 +481,15 @@ async function drive(
     : {}
   // The flag is the non-interactive API for the same screen, so it works with --yes
   // AND overrides the wizard when both spoke: it is the more explicit instruction.
-  // "off" is present-and-undefined, which REMOVES the key rather than writing a value.
+  // "off" is WRITTEN, not removed: a missing key means "never asked", and only an
+  // explicit "off" survives the next run's default.
+  // The installer's default is routing on; a value already in the user file (a mode
+  // or "off") is the user's earlier answer and is kept. See the project merge below.
+  const routingDefaulted = flags.autoRouting === undefined && !interactive
   if (flags.autoRouting !== undefined) {
-    answers.autoRouting = flags.autoRouting === OFF_VALUE ? undefined : flags.autoRouting
+    answers.autoRouting = flags.autoRouting
+  } else if (routingDefaulted && !hasAutoRouting(existingUser)) {
+    answers.autoRouting = SUGGESTIONS.autoRouting?.[0]
   }
 
   const userMerge = mergeTelemConfig(ports.readText(userPath), answers, userPath)
@@ -516,13 +522,7 @@ async function drive(
         home: ports.env.HOME ?? ports.env.USERPROFILE ?? "",
         projectRoot: project?.root,
       }),
-      // A key the user explicitly REMOVED counts as answered: a legacy file that
-      // still sets it outranks the removal, so "off" would otherwise report success
-      // while routing stayed on. Scoped to autoRouting, the key with an explicit
-      // off; removals on the other screens stay hidden (see the PR's follow-up).
-      Object.keys(answers)
-        .filter((key) => answers[key] !== undefined)
-        .concat("autoRouting" in answers && answers.autoRouting === undefined ? ["autoRouting"] : []),
+      Object.keys(answers).filter((key) => answers[key] !== undefined),
     ),
   )
 
@@ -538,7 +538,12 @@ async function drive(
   if (wantProject) {
     const root = project?.root ?? ports.cwd
     const projectPath = join(root, ".telem", "telem.json")
-    const projectMerge = mergeTelemConfig(ports.readText(projectPath), answers, projectPath)
+    // The synthesized routing default goes to the USER file only. The project file
+    // outranks it, so writing it here would replace a project "off" or override a
+    // user "off"; without the key the project simply inherits the user's answer.
+    const projectAnswers = { ...answers }
+    if (routingDefaulted) delete projectAnswers.autoRouting
+    const projectMerge = mergeTelemConfig(ports.readText(projectPath), projectAnswers, projectPath)
     if (projectMerge.status === "abort") {
       ports.stderr(`error: ${projectMerge.reason}`)
       ports.stderr("Nothing was written.")
@@ -2385,6 +2390,12 @@ const UNSET_LABEL = "leave unset"
  * Every answer still travels through the SHIPPED coercers via `answerToValue`, so a
  * value this screen accepts is a value every reader resolves.
  */
+/** Whether the existing user file already answered the auto-routing question. */
+function hasAutoRouting(existing: unknown): boolean {
+  const value = (existing as Record<string, unknown> | null | undefined)?.autoRouting
+  return typeof value === "string" && value.trim() !== ""
+}
+
 async function askOptions(
   ui: Ui,
   existing: Record<string, unknown>,
@@ -2415,7 +2426,9 @@ async function askOptions(
   // A mode this installer cannot offer is still the user's setting: `latency` on a
   // self-hosted deployment, or a value a newer version wrote. It stays a choice and
   // the cursor starts on it, so Enter keeps it rather than deleting it.
-  const unofferable = currentRouting && !routingModes.includes(currentRouting) ? [currentRouting] : []
+  const isOff = currentRouting.toLowerCase() === OFF_VALUE
+  const unofferable =
+    currentRouting && !isOff && !routingModes.includes(currentRouting) ? [currentRouting] : []
   // The SHAPE follows the vocabulary: one mode to offer is a yes/no question, and
   // anything richer — a second mode, or a configured one we cannot offer — needs a
   // list. So this becomes a select on its own the day latency and search_cost land.
@@ -2432,20 +2445,25 @@ async function askOptions(
         ...routingModes.map((value) => ({ value, label: AUTO_ROUTING_LABELS[value] ?? value })),
         ...unofferable.map((value) => ({ value, label: `${value} — your current setting, kept as it is` })),
       ],
-      initialValue: [...routingModes, ...unofferable].includes(currentRouting) ? currentRouting : OFF_VALUE,
+      // Starts on routing unless the file already says off: on is the default.
+      initialValue: isOff
+        ? OFF_VALUE
+        : [...routingModes, ...unofferable].includes(currentRouting)
+          ? currentRouting
+          : (routingModes[0] ?? OFF_VALUE),
     })
   } else {
     const enable = await ui.confirm({
       message: "Let Telem choose which providers run each search? (auto-routing)",
-      initialValue: routingModes.includes(currentRouting),
+      // On is the default; only a file that already says "off" starts on No.
+      initialValue: !isOff,
     })
     routing = enable ? (routingModes[0] as string) : OFF_VALUE
   }
   if (routing === OFF_VALUE) {
-    // Present-and-undefined REMOVES the key, so answering No clears a mode an
-    // earlier run wrote rather than leaving it in place.
-    answers.autoRouting = undefined
-    if (currentRouting) ui.info(`${UNSET_LABEL} — auto-routing is off`)
+    // WRITTEN, not removed: a missing key means "never asked", and only an explicit
+    // "off" keeps the next run from offering routing as the default again.
+    answers.autoRouting = OFF_VALUE
   } else if (unofferable.includes(routing)) {
     // Their own value, kept verbatim. It deliberately bypasses `answerToValue`,
     // whose suggestion gate rejects anything this installer does not offer — the
