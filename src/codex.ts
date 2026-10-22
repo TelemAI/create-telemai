@@ -118,6 +118,14 @@ export const CODEX_TABLE = CODEX_TABLE_PARTS.join(".")
 export const CODEX_WEB_SEARCH_KEY = "web_search"
 /** The hosted Telem MCP endpoint Codex's remote server points at. */
 export const CODEX_URL = "https://mcp.telem.ai/mcp"
+/** The hosted MCP's per-connection auto-routing switch. The server accepts exactly
+ * these two values and refuses the connection on any other, so nothing else is
+ * ever written. */
+export const ROUTING_HEADER = "X-Telem-Auto-Routing"
+export type HostedRouting = "accuracy" | "off"
+export function hostedRouting(value: unknown): HostedRouting | undefined {
+  return value === "accuracy" || value === "off" ? value : undefined
+}
 /**
  * A real tlm_ key is urlsafe-base64: letters, digits, `_` and `-`, nothing else. The
  * key is interpolated verbatim into an INLINE TOML `http_headers` table, so any other
@@ -373,25 +381,28 @@ function currentValue(line: string): string {
  * With no key we write the url alone — never an empty/placeholder Bearer — and the
  * run prints a note to add the header by hand.
  */
-function remoteTableBody(apiKey: string | null): TomlLine[] {
+function remoteTableBody(apiKey: string | null, routing: HostedRouting | null): TomlLine[] {
   const body: TomlLine[] = [{ kind: "pair", text: `url = "${CODEX_URL}"`, key: "url", parts: ["url"] }]
-  if (apiKey) body.push(authHeaderLine(apiKey))
+  if (apiKey) body.push(authHeaderLine(apiKey, routing))
   return body
 }
 
-/** The one inline `http_headers` line, so a fresh write and a reconcile agree. */
-function authHeaderLine(apiKey: string): TomlLine {
+/** The one inline `http_headers` line, so a fresh write and a reconcile agree. The
+ * routing header rides only beside a key: a keyless table 401s anyway, and the
+ * run tells the user to add the header by hand. */
+function authHeaderLine(apiKey: string, routing: HostedRouting | null): TomlLine {
+  const routingPair = routing ? `, ${ROUTING_HEADER} = "${routing}"` : ""
   return {
     kind: "pair",
-    text: `http_headers = { Authorization = "Bearer ${apiKey}" }`,
+    text: `http_headers = { Authorization = "Bearer ${apiKey}"${routingPair} }`,
     key: "http_headers",
     parts: ["http_headers"],
   }
 }
 
 /** The bare text of the remote table, header included — used for a fresh write. */
-function remoteTableText(apiKey: string | null): string {
-  return `[${CODEX_TABLE}]\n${remoteTableBody(apiKey)
+function remoteTableText(apiKey: string | null, routing: HostedRouting | null): string {
+  return `[${CODEX_TABLE}]\n${remoteTableBody(apiKey, routing)
     .map((line) => line.text)
     .join("\n")}\n`
 }
@@ -494,6 +505,7 @@ function reconcileHostedAuth(
   lines: TomlLine[],
   telem: TelemTable,
   apiKey: string | null,
+  routing: HostedRouting | null,
 ): "added" | "replaced" | null {
   if (!apiKey) return null
   const urlIndex = lines.findIndex(
@@ -514,7 +526,7 @@ function reconcileHostedAuth(
       index > telem.headerIdx && index < telem.ownEnd && line.kind === "pair" && isKeyPath(line.parts, ["http_headers"]),
   )
   if (headerIndex === -1) {
-    lines.splice(urlIndex + 1, 0, authHeaderLine(apiKey))
+    lines.splice(urlIndex + 1, 0, authHeaderLine(apiKey, routing))
     return "added"
   }
   // A multi-line value continues onto the following lines; a one-line rewrite would
@@ -533,6 +545,64 @@ function reconcileHostedAuth(
     text: text.replace(HOSTED_AUTH_BEARER, (_all, head: string, _old: string, tail: string) => `${head}Bearer ${apiKey}${tail}`),
   }
   return "replaced"
+}
+
+const ROUTING_PAIR = /((?:"X-Telem-Auto-Routing"|'X-Telem-Auto-Routing'|X-Telem-Auto-Routing)\s*=\s*)("[^"]*"|'[^']*')/i
+
+/**
+ * Set the routing header inside an EXISTING hosted table's one-line inline
+ * `http_headers`, and nothing else: the key is replaced in place or appended before
+ * the closing brace, so Authorization and any header the user added keep their
+ * values and their order. The same abstentions as the auth reconcile apply — a
+ * custom url, a sub-table or dotted `http_headers`, a multi-line value, or a line
+ * whose inline table cannot be found is left untouched.
+ */
+function reconcileHostedRouting(
+  lines: TomlLine[],
+  telem: TelemTable,
+  routing: HostedRouting | null,
+): "added" | "replaced" | null {
+  if (!routing) return null
+  const inTable = (index: number) => index > telem.headerIdx && index < telem.ownEnd
+  const urlIndex = lines.findIndex((line, index) => inTable(index) && line.kind === "pair" && isKeyPath(line.parts, ["url"]))
+  if (urlIndex === -1 || stringValue(currentValue(lines[urlIndex].text)) !== CODEX_URL) return null
+  if (telem.subTables.some((parts) => isKeyPath(parts, [...CODEX_TABLE_PARTS, "http_headers"]))) return null
+  if (telem.pairs.some((pair) => isUnderKeyPath(pair.parts, ["http_headers"]))) return null
+  const headerIndex = lines.findIndex(
+    (line, index) => inTable(index) && line.kind === "pair" && isKeyPath(line.parts, ["http_headers"]),
+  )
+  if (headerIndex === -1 || lines[headerIndex + 1]?.kind === "continuation") return null
+
+  const text = lines[headerIndex].text
+  const equals = indexOfAssignment(text)
+  const after = text.slice(equals + 1)
+  const comment = commentIndex(after)
+  const value = comment === -1 ? after : after.slice(0, comment)
+  const tail = comment === -1 ? "" : after.slice(comment)
+  const open = value.indexOf("{")
+  const close = value.lastIndexOf("}")
+  if (equals === -1 || open === -1 || close < open) return null
+
+  let next: string
+  let outcome: "added" | "replaced"
+  const match = ROUTING_PAIR.exec(value)
+  if (match) {
+    if (stringValue(match[2]) === routing) return null
+    next = value.replace(ROUTING_PAIR, (_all, head: string) => `${head}"${routing}"`)
+    outcome = "replaced"
+  } else {
+    const inner = value.slice(open + 1, close).trim()
+    const body = inner ? `${inner.replace(/,\s*$/, "")}, ` : ""
+    next = `${value.slice(0, open)}{ ${body}${ROUTING_HEADER} = "${routing}" }${value.slice(close + 1)}`
+    outcome = "added"
+  }
+  lines[headerIndex] = {
+    kind: "pair",
+    key: "http_headers",
+    parts: ["http_headers"],
+    text: `${text.slice(0, equals + 1)}${next}${tail}`,
+  }
+  return outcome
 }
 
 /** One pre-granted hook trust entry: Codex's own hook key, and its current hash.
@@ -743,9 +813,13 @@ export function planCodexConfig(
     /** Pre-granted trust for the Codex plugin's hooks, derived in codex-plugin.ts.
      * Empty/absent → no `[hooks.state."…"]` table is touched at all. */
     hookTrust?: readonly CodexHookTrustEntry[]
+    /** The `X-Telem-Auto-Routing` value for the hosted connection; absent → the
+     * header is neither written nor touched. */
+    autoRouting?: HostedRouting | null
   },
   path: string,
 ): CodexEdit {
+  const routing = options.autoRouting ?? null
   const rawApiKey = options.apiKey ?? null
   // A key that is not the tlm_ urlsafe-base64 charset must NEVER be interpolated into
   // the inline http_headers table — a crafted value (a `"` plus a newline) would
@@ -774,7 +848,7 @@ export function planCodexConfig(
     // abstain guards and the exact table shape have one implementation. The text we
     // just built is TOML we wrote ourselves, so re-scanning it cannot fail; if it
     // somehow did, the trust tables are skipped rather than the install broken.
-    const freshScan = scanToml(`${head}${remoteTableText(apiKey)}`)
+    const freshScan = scanToml(`${head}${remoteTableText(apiKey, routing)}`)
     const fresh: TomlLine[] = freshScan.ok ? freshScan.lines.slice(0, -1) : []
     const trust = freshScan.ok
       ? applyHookTrust(fresh, options.hookTrust ?? [], changes)
@@ -792,7 +866,7 @@ export function planCodexConfig(
       hookTrustAbstained: trust.abstained,
       contents: freshScan.ok
         ? `${fresh.map((line) => line.text).join("\n")}\n`
-        : `${head}${remoteTableText(apiKey)}`,
+        : `${head}${remoteTableText(apiKey, routing)}`,
     }
   }
 
@@ -915,7 +989,7 @@ export function planCodexConfig(
     while (lines.length && lines[lines.length - 1].kind === "blank") lines.pop()
     if (lines.length) lines.push({ kind: "blank", text: "" })
     lines.push({ kind: "header", text: `[${CODEX_TABLE}]`, name: CODEX_TABLE, parts: [...CODEX_TABLE_PARTS] })
-    lines.push(...remoteTableBody(apiKey))
+    lines.push(...remoteTableBody(apiKey, routing))
     changes.push(`add [${CODEX_TABLE}] (hosted url${apiKey ? " + auth header" : ""})`)
     addedTable = true
     wroteHostedTable = true
@@ -931,13 +1005,18 @@ export function planCodexConfig(
       // Already hosted. The url stays the user's, but an auth header that is absent
       // or stale is reconciled with the effective key — otherwise a keyless first
       // run, or a rotated key, leaves this table 401ing forever under a "unchanged".
-      const outcome = reconcileHostedAuth(lines, telem, apiKey)
+      const outcome = reconcileHostedAuth(lines, telem, apiKey, routing)
       if (outcome !== null) {
         changes.push(
           outcome === "added"
             ? `add the Telem auth header to [${CODEX_TABLE}]`
             : `replace the stale Telem auth header in [${CODEX_TABLE}]`,
         )
+        reconciled = true
+      }
+      const routed = reconcileHostedRouting(lines, telem, routing)
+      if (routed !== null) {
+        changes.push(`set ${ROUTING_HEADER} = "${routing}" in [${CODEX_TABLE}]`)
         reconciled = true
       }
     }

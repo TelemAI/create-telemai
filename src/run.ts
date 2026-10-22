@@ -32,13 +32,15 @@ import {
   planClaudePluginConfig,
 } from "./claude.ts"
 import { mergeTelemConfig } from "./configfile.ts"
-import type { CodexHookTrustEntry } from "./codex.ts"
+import type { CodexHookTrustEntry, HostedRouting } from "./codex.ts"
 import {
   CODEX_HOOK_STATE_PATH,
   CODEX_TABLE,
   CODEX_URL,
+  ROUTING_HEADER,
   classifyCodexTelemTable,
   codexWebSearchDisabled,
+  hostedRouting,
   planCodexConfig,
 } from "./codex.ts"
 import {
@@ -580,7 +582,14 @@ async function drive(
   // in this set: a network failure says nothing about the key, and that path keeps it.
   const surfaceApiKey =
     credential.status === "rejected" ? undefined : (credential.apiKey ?? existingCredentials.apiKey)
-  await planSurfaces(ports, flags, ui, { plan, selected, tools, interactive, apiKey: surfaceApiKey })
+  await planSurfaces(ports, flags, ui, {
+    plan,
+    selected,
+    tools,
+    interactive,
+    apiKey: surfaceApiKey,
+    autoRouting: hostedRouting(answers.autoRouting ?? (existingUser as Record<string, unknown> | null)?.autoRouting),
+  })
 
   return finish(ports, flags, plan, {
     say,
@@ -665,6 +674,9 @@ type SurfaceContext = {
    * remote's `http_headers` in config.toml, and Claude's `pluginConfigs` in settings.json.
    */
   apiKey?: string
+  /** The `X-Telem-Auto-Routing` value for the hosted MCP connection: the user's
+   * effective answer when it is one the server accepts, else absent (no header). */
+  autoRouting?: HostedRouting
 }
 
 async function planSurfaces(
@@ -770,7 +782,7 @@ async function planSurfaces(
         planClaudeCode(ports, plan, tools, home, context.apiKey)
         break
       case "codex":
-        await planCodex(ports, flags, ui, plan, home, tools, context.apiKey)
+        await planCodex(ports, flags, ui, plan, home, tools, context.apiKey, context.autoRouting)
         break
       case "pi":
         planPi(plan, tools)
@@ -799,7 +811,13 @@ async function planSurfaces(
               `${JSON.stringify(
                 {
                   mcpServers: {
-                    telem: { url: CODEX_URL, headers: { Authorization: "Bearer tlm_…" } },
+                    telem: {
+                      url: CODEX_URL,
+                      headers: {
+                        Authorization: "Bearer tlm_…",
+                        ...(context.autoRouting ? { [ROUTING_HEADER]: context.autoRouting } : {}),
+                      },
+                    },
                   },
                 },
                 null,
@@ -1005,6 +1023,7 @@ async function planCodex(
   home: string,
   tools: Record<string, ToolInfo>,
   apiKey: string | undefined,
+  autoRouting: HostedRouting | undefined,
 ): Promise<void> {
   const codexHome = codexHomeDir(ports.env, home)
   const configPath = join(codexHome, "config.toml")
@@ -1047,7 +1066,7 @@ async function planCodex(
 
   const edit = planCodexConfig(
     source,
-    { disableWebSearch, captureReasoning, apiKey, hookTrust },
+    { disableWebSearch, captureReasoning, apiKey, hookTrust, autoRouting },
     configPath,
   )
   if (edit.status === "abort") {
