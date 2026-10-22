@@ -22,7 +22,7 @@
 // half); the tool call proceeds unchanged.
 import { readFileSync } from "node:fs";
 
-import { searchBlockFromConfig } from "./telem-config.mjs";
+import { hostedSearchBlockFromConfig } from "./telem-config.mjs";
 
 const HISTORY_TEXT_CAP = 128_000; // mirror of both MCP servers' _HISTORY_KEYS cap
 const OPTIONS_BLOCK_MAX_BYTES = 4096; // mirror of the hosted server's options cap (spec D4/D8)
@@ -111,7 +111,7 @@ function warn(message) {
 function readConfigOptions(cwd, env = process.env) {
   try {
     const projectRoot = typeof cwd === "string" && cwd ? cwd : undefined;
-    const block = searchBlockFromConfig(env, projectRoot, warn);
+    const block = hostedSearchBlockFromConfig(env, projectRoot, warn);
     if (!block) return undefined;
     if (Object.prototype.hasOwnProperty.call(block, "provider_overrides")) {
       delete block.provider_overrides;

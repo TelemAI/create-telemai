@@ -293,12 +293,16 @@ export function resolveConfigOptions(env = process.env, projectRoot = undefined)
   }
   // config-core's dropAutoRoutingOff: "off" (any case) wins precedence like any
   // value, then resolves to absent — the router answers 422 for it as a mode.
-  if (typeof values.autoRouting === "string" && values.autoRouting.toLowerCase() === "off") {
+  // The hosted MCP routes when nothing is set, so its channel must still see the
+  // "off"; `autoRoutingOff` carries that to `hostedSearchBlockFromConfig` only.
+  const autoRoutingOff =
+    typeof values.autoRouting === "string" && values.autoRouting.toLowerCase() === "off"
+  if (autoRoutingOff) {
     delete values.autoRouting
     delete sources.autoRouting
   }
 
-  return { values, sources, warnings, telemDir: telemDir.dir }
+  return { values, sources, warnings, telemDir: telemDir.dir, ...(autoRoutingOff ? { autoRoutingOff } : {}) }
 }
 
 const SOURCE_RANK = { project: 0, user: 1, env: 2 }
@@ -551,6 +555,19 @@ export function blocksFromConfig(
  */
 export function searchBlockFromConfig(env = process.env, projectRoot = undefined, warn = console.error) {
   return buildSearchBlock(resolveAndWarn(env, projectRoot, warn), env, warn)
+}
+
+/**
+ * The search block for the HOSTED MCP bridge: the same block, plus
+ * `auto_routing: "off"` when the user turned routing off. The router path drops
+ * "off" (the router 422s it), but the hosted server routes by default, so this
+ * channel has to say it.
+ */
+export function hostedSearchBlockFromConfig(env = process.env, projectRoot = undefined, warn = console.error) {
+  const resolved = resolveAndWarn(env, projectRoot, warn)
+  const block = buildSearchBlock(resolved, env, warn)
+  if (!resolved.autoRoutingOff) return block
+  return { ...(block ?? {}), auto_routing: "off" }
 }
 
 /**

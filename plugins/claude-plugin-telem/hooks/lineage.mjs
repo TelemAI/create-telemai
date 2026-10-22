@@ -43,7 +43,7 @@ import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { build_snapshot } from "./v5hash.mjs";
-import { searchBlockFromConfig } from "./telem-config.mjs";
+import { hostedSearchBlockFromConfig } from "./telem-config.mjs";
 
 const HARNESS = "claude-code";
 const ENVELOPE_VERSION = 1;
@@ -267,7 +267,7 @@ function warnToStderr(message) {
 // Resolve the user's .telem config into the hosted `options` payload, or undefined for
 // "no options key" (hosted-options the design notes/D8). This is the WRAPPER above the
 // vendored, unforked reader in telem-config.mjs:
-//   1. searchBlockFromConfig (vendored resolve + the three composition rules) with an
+//   1. hostedSearchBlockFromConfig (vendored resolve + the three composition rules) with an
 //      explicit stderr sink for reader/composition warnings;
 //   2. STRIP `provider_overrides` — excluded from this channel in v1 (D3); one warning
 //      naming the hosted surface, only when the key was actually present;
@@ -284,7 +284,7 @@ function warnToStderr(message) {
 // OWN try/catch, deliberately (D8): emit's outer catch returns "" — the no-envelope
 // path — and a config failure must degrade to "lineage without options", never to
 // "no lineage". Never throws.
-export function readConfigOptions(cwd, env = process.env, warn = warnToStderr, blockSource = searchBlockFromConfig) {
+export function readConfigOptions(cwd, env = process.env, warn = warnToStderr, blockSource = hostedSearchBlockFromConfig) {
   try {
     const projectRoot = typeof cwd === "string" && cwd !== "" ? cwd : undefined;
     const block = blockSource(env, projectRoot, warn);
