@@ -13,6 +13,18 @@ import { MIN_OPENCLAW_VERSION } from "./detect.ts"
 export type InstallErrorContext = "npm" | "python" | "openclaw-version"
 
 /**
+ * The one line of a failed command's output worth showing: the first line that says
+ * "error", else the last non-empty line. Not the first line: that is usually progress
+ * chatter (Hermes prints "Preparing the isolated Hermes runtime…" before its real
+ * "Error: …"). Not the last error line: npm always ends with "npm error A complete log
+ * of this run can be found in: …", after the line that names the cause.
+ */
+export function failureLine(raw: string): string {
+  const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean)
+  return lines.find((line) => /error/i.test(line)) ?? lines.at(-1) ?? ""
+}
+
+/**
  * Map a raw tool failure to an actionable message, or `null` when nothing known
  * matches — in which case the caller keeps its generic "<cmd> exited N" detail, so an
  * unrelated failure is never mislabeled. `openclaw-version` is the exception: it is

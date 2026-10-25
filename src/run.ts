@@ -20,6 +20,7 @@
 //      ~/.claude/settings.json — pluginConfigs["telem@telem"].options.TELEM_API_KEY,
 //        which the Claude Code plugin's inline MCP server reads.
 
+import { realpathSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 import { credentialsPath, resolveTelemDir, userConfigPath } from "../config-core/files.ts"
@@ -77,7 +78,7 @@ import {
   uvInstallCommand,
 } from "./detect.ts"
 import type { InstallErrorContext } from "./errors.ts"
-import { translateInstallError } from "./errors.ts"
+import { failureLine, translateInstallError } from "./errors.ts"
 import type { Flags } from "./flags.ts"
 import { HELP_TEXT, ignoredInteractiveFlags, missingRequiredFlags, parseFlags } from "./flags.ts"
 import type { Question } from "./interview.ts"
@@ -1450,6 +1451,24 @@ function planHermes(ports: Ports, plan: Plan, tools: Record<string, ToolInfo>, h
     setOutcome(plan, "hermes", "manual", "hermes is not on PATH; command printed below")
     return
   }
+  // Homebrew's Hermes cannot install any plugin with Python dependencies (upstream
+  // NousResearch/hermes-agent#126711), and a Hermes older than 0.21.6 rejects
+  // --yes-deps. Version strings are unreliable (brew prints "vunknown"), so detect
+  // the build by its real path and the feature by its --help text.
+  const hermes = tools.hermes.path
+  if (realPath(hermes).includes("/Cellar/hermes-agent/")) {
+    return refuseHermes(
+      plan,
+      "Homebrew builds of Hermes cannot install plugins that need Python packages " +
+        "(https://github.com/NousResearch/hermes-agent/issues/126711). Remove Homebrew Hermes with " +
+        "`brew uninstall hermes-agent`, install Hermes with the official installer, then re-run:\n\n" +
+        "    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+    )
+  }
+  const help = ports.exec([hermes, "plugins", "install", "--help"])
+  if (help.status === 0 && !`${help.stdout}${help.stderr}`.includes("--yes-deps")) {
+    return refuseHermes(plan, "Hermes 0.21.6 or newer is required. Update Hermes with `hermes update`, then re-run.")
+  }
   // Re-run: install refuses an existing plugin dir without --force, and a reinstall
   // would re-clone for nothing. `enable` is idempotent and asks no question.
   const hermesHome = (ports.env.HERMES_HOME ?? "").trim() || join(home, ".hermes")
@@ -1461,6 +1480,20 @@ function planHermes(ports: Ports, plan: Plan, tools: Record<string, ToolInfo>, h
     optional: false,
   })
   setOutcome(plan, "hermes", "installed", argv.join(" "))
+}
+
+function refuseHermes(plan: Plan, message: string): void {
+  plan.notes.push(surfaceNote("hermes", message))
+  setOutcome(plan, "hermes", "failed", message)
+}
+
+/** The path with every symlink resolved, or the path itself if it cannot be. */
+function realPath(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return path
+  }
 }
 
 function planPi(plan: Plan, tools: Record<string, ToolInfo>): void {
@@ -2092,14 +2125,15 @@ async function finish(
     commandFailed = commandFailed || !result.command.optional
     // Translate the misleading raw failures (npm E404-as-permission, pip/uv
     // no-matching-distribution-as-Python-floor) into actionable messages; anything
-    // unknown keeps the generic "<cmd> exited N: <first line>" detail.
-    const raw = result.stderr.trim() || result.stdout.trim()
+    // unknown keeps the generic "<cmd> exited N: <error line>" detail. Both streams:
+    // Hermes prints progress on stderr and its "Error: …" on stdout.
+    const raw = [result.stderr, result.stdout].map((text) => text.trim()).filter(Boolean).join("\n")
     const context = errorContextFor(result.command)
     const translated = context ? translateInstallError(context, raw) : null
     const detail =
       translated ??
       `${result.command.argv[0]} exited ${result.status ?? "abnormally"}${
-        raw ? `: ${raw.split("\n")[0]}` : ""
+        raw ? `: ${failureLine(raw)}` : ""
       }`
     // One failure, one report. The surface row already carries the id and the detail,
     // so pushing the same text into `warnings` printed it a second time in the same
