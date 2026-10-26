@@ -24,6 +24,8 @@ export type Flags = {
   dryRun: boolean
   project: boolean
   codexDisableWebSearch: boolean
+  /** Non-interactive consent to add "WebSearch" to Claude Code's permissions.deny. */
+  claudeDisableWebSearch: boolean
   /** Codex reasoning capture is ADDITIVE and ON by default; --no-codex-reasoning opts out. */
   codexReasoning: boolean
   /** Non-interactive consent to migrate an existing stdio Codex telem table to the hosted remote. */
@@ -48,6 +50,7 @@ const EMPTY: Flags = {
   dryRun: false,
   project: false,
   codexDisableWebSearch: false,
+  claudeDisableWebSearch: false,
   // ON by default: reasoning capture only adds capture, it disables nothing.
   codexReasoning: true,
   codexMigrateHooks: false,
@@ -145,6 +148,9 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
       case "--codex-disable-web-search":
         flags.codexDisableWebSearch = true
         break
+      case "--claude-disable-web-search":
+        flags.claudeDisableWebSearch = true
+        break
       case "--no-codex-reasoning":
         flags.codexReasoning = false
         break
@@ -207,6 +213,7 @@ export function ignoredInteractiveFlags(flags: Flags): string[] {
   if (flags.clients.length) ignored.push("--client (the wizard asks which surfaces)")
   if (flags.project) ignored.push("--project (the wizard asks about the project config)")
   if (flags.codexDisableWebSearch) ignored.push("--codex-disable-web-search (the wizard asks)")
+  if (flags.claudeDisableWebSearch) ignored.push("--claude-disable-web-search (the wizard asks)")
   if (flags.codexMigrateHooks) ignored.push("--codex-migrate-hooks (the wizard asks)")
   if (flags.installUv) ignored.push("--install-uv (the wizard asks)")
   if (flags.writeUnverified) ignored.push("--write-unverified (the wizard asks)")
@@ -246,6 +253,8 @@ Flags (they double as the non-interactive API):
                                 routing are coming shortly
   --project                     also write <cwd>/.telem/telem.json
   --codex-disable-web-search    also set web_search = "disabled" in Codex's config
+  --claude-disable-web-search   also add "WebSearch" to permissions.deny in Claude
+                                Code's settings.json
   --no-codex-reasoning          skip the Codex telem plugin (reasoning hook AND
                                 telem skill) and model_reasoning_summary; capture
                                 is on by default

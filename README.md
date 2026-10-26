@@ -56,7 +56,7 @@ OpenCode itself is a Bun binary.
 | `<project>/.telem/telem.json` | the same, shared with the repo (offered only inside a project) | `0644` |
 | `~/.config/opencode/opencode.json(c)` | `@telemai/opencode-plugin` added to the `plugin` array | unchanged |
 | `~/.codex/config.toml` | `[mcp_servers.telem]` pointing at the hosted MCP, with your key in its `http_headers` Authorization line; `model_reasoning_summary = "detailed"` so Codex emits the summaries the hook captures; a `[hooks.state."…"]` entry pre-trusting the plugin's hook; plus `web_search` only if you consent | `0600` when it carries the key, otherwise unchanged |
-| `~/.claude/settings.json` | `pluginConfigs["telem@telem"].options.TELEM_API_KEY` — the key the Claude Code plugin's inline MCP server reads | `0600` |
+| `~/.claude/settings.json` | `pluginConfigs["telem@telem"].options.TELEM_API_KEY` — the key the Claude Code plugin's inline MCP server reads; plus `"WebSearch"` in `permissions.deny` only if you consent | `0600` |
 
 **The API key never appears on a command line and is never printed.** The
 installer refuses to run a command, print an instruction, or emit a summary
@@ -87,7 +87,7 @@ prints just before it asks for the key.
 | `--client` | What happens |
 |---|---|
 | `opencode` | adds `@telemai/opencode-plugin` to the `plugin` array of `opencode.json`/`opencode.jsonc` |
-| `claude-code` | `claude plugin marketplace add` + `claude plugin install telem@telem` (hosted MCP + lineage hooks; key staged into plugin config) |
+| `claude-code` | `claude plugin marketplace add` + `claude plugin install telem@telem` (hosted MCP + lineage hooks; key staged into plugin config). `"WebSearch"` in `permissions.deny` only with your consent, so Claude Code's own web search is off and its searches go through Telem. |
 | `codex` | points `[mcp_servers.telem]` in `~/.codex/config.toml` at the hosted MCP (url + auth header), then `codex plugin marketplace add TelemAI/codex-plugin` + `codex plugin add telem@telem` for the reasoning hook and the telem skill. Codex skips an untrusted plugin hook *silently* and has no CLI to trust one, so the installer also pre-grants that hook's trust in `config.toml`. An existing stdio table is left exactly as it is — the local server it starts is deprecated, and nothing rewrites a table this installer did not write; an *older hand-written* reasoning hook under `~/.codex/hooks/` is replaced only with your consent (`--codex-migrate-hooks`) — without it the plugin is not installed, because both hooks would fire on every search — and if this run *cannot* install the plugin (no `codex` on PATH, no plugin source), the old hook is left exactly as it is and the surface is reported `manual` rather than installed. `web_search = "disabled"` only with your consent. Needs no local `telem-mcp`. |
 | `pi` | `pi install npm:@telemai/pi-telem` |
 | `openclaw` | `openclaw plugins install npm:@telemai/openclaw-plugin --force` + `openclaw config set tools.alsoAllow` (merged with whatever it already allows, because `config set` replaces the array). The wizard owns the version gate: openclaw below `2026.7.1` cannot load the plugin and is refused rather than "installed" into. It does **not** delegate to `telem-openclaw-setup` — that is a source-checkout dev tool (`npm ci` + `--link`), and the published tarball has no lockfile for `npm ci`. |
@@ -156,6 +156,8 @@ The flags are the non-interactive API. On a non-TTY — a pipe, `CI=true`, or
                               now; latency and search_cost routing are coming shortly
 --project                     also write <cwd>/.telem/telem.json
 --codex-disable-web-search    also set web_search = "disabled" in Codex's config
+--claude-disable-web-search   also add "WebSearch" to permissions.deny in Claude
+                              Code's settings.json
 --no-codex-reasoning          skip the Codex telem plugin and model_reasoning_summary
 --codex-migrate-hooks         replace an older hand-written Codex reasoning hook
                               with the telem Codex plugin

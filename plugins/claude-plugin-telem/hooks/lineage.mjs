@@ -37,13 +37,18 @@
 // envelope's `options` key — INSIDE the bridge, so updatedInput still gains exactly one
 // key. The config step has its OWN try/catch degrading to "no options" (D8): a config
 // throw must never cost the lineage. Warnings go to stderr (debug-only on this host).
+//
+// HOSTED FETCH OPTIONS: the same
+// one resolution also yields the fetch block (fetchProviders / fetchTier / fetchNoCache ->
+// providers / tier / no_cache), shipped as the envelope's top-level `fetch_options` key on
+// EVERY call, search included — each server path reads only its own slot.
 
 import { readFileSync, openSync, fstatSync, readSync, closeSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { build_snapshot } from "./v5hash.mjs";
-import { hostedSearchBlockFromConfig } from "./telem-config.mjs";
+import { hostedBlocksFromConfig } from "./telem-config.mjs";
 
 const HARNESS = "claude-code";
 const ENVELOPE_VERSION = 1;
@@ -264,30 +269,50 @@ function warnToStderr(message) {
   }
 }
 
-// Resolve the user's .telem config into the hosted `options` payload, or undefined for
-// "no options key" (hosted-options the design notes/D8). This is the WRAPPER above the
-// vendored, unforked reader in telem-config.mjs:
-//   1. hostedSearchBlockFromConfig (vendored resolve + the three composition rules) with an
-//      explicit stderr sink for reader/composition warnings;
-//   2. STRIP `provider_overrides` — excluded from this channel in v1 (D3); one warning
-//      naming the hosted surface, only when the key was actually present;
-//   3. drop the whole block, with a warning, when its compact JSON exceeds
-//      OPTIONS_MAX_BYTES (D8 mirrors the server cap hook-side);
-//   4. return the non-empty block, or undefined.
+// Resolve the user's .telem config into the hosted `options` and `fetch_options` payloads
+// (hosted-options the design notes/D8; hosted-fetch-options spec F5). This is the WRAPPER above
+// the vendored, unforked reader in telem-config.mjs:
+//   1. hostedBlocksFromConfig — ONE resolution, both builders (the search one with the
+//      three composition rules, plus the hosted "off"), with an explicit stderr sink for
+//      reader/composition warnings;
+//   2. search block: STRIP `provider_overrides` — excluded from this channel in v1 (D3);
+//      one warning naming the hosted surface, only when the key was actually present;
+//   3. each block on its own: drop it, with a warning, when its compact JSON exceeds
+//      OPTIONS_MAX_BYTES (D8 mirrors the server cap hook-side) — the other block stays;
+//   4. return `{ options?, fetchOptions? }`, each key present only when non-empty.
 //
 // `cwd` comes from the PreToolUse payload; absent/non-string cwd -> the user + env
 // levels only (D2). `env`/`warn` are the injectable seams the tests need; production
-// callers pass (payload.cwd, env) and keep the defaults. `blockSource` exists ONLY so
-// tests can drive the wrapper's own guards (a throwing reader, an empty-after-strip
-// block) — never pass it in production code.
+// callers pass (payload.cwd, env) and keep the defaults. `blocksSource` exists ONLY so
+// tests can drive the wrapper's own guards (a throwing reader, a lone block) — never pass
+// it in production code.
 //
 // OWN try/catch, deliberately (D8): emit's outer catch returns "" — the no-envelope
 // path — and a config failure must degrade to "lineage without options", never to
-// "no lineage". Never throws.
-export function readConfigOptions(cwd, env = process.env, warn = warnToStderr, blockSource = hostedSearchBlockFromConfig) {
+// "no lineage". A resolution throw costs both blocks, with one warning. Never throws.
+export function readConfigBlocks(cwd, env = process.env, warn = warnToStderr, blocksSource = hostedBlocksFromConfig) {
+  let blocks;
   try {
     const projectRoot = typeof cwd === "string" && cwd !== "" ? cwd : undefined;
-    const block = blockSource(env, projectRoot, warn);
+    blocks = blocksSource(env, projectRoot, warn);
+  } catch (error) {
+    warn(
+      `[telem] ignoring the Telem config: reading it failed (${error?.message || String(error)}), ` +
+        "so this call carries no search or fetch options.",
+    );
+    return {};
+  }
+  const out = {};
+  const options = searchOptionsOf(blocks?.search, warn);
+  if (options !== undefined) out.options = options;
+  const fetchOptions = cappedBlock(blocks?.fetch, "fetch", "fetchProviders list", warn);
+  if (fetchOptions !== undefined) out.fetchOptions = fetchOptions;
+  return out;
+}
+
+// The search block, ready for the envelope's `options`, or undefined. Never throws.
+function searchOptionsOf(block, warn) {
+  try {
     if (block === null || typeof block !== "object") return undefined;
     if (Object.prototype.hasOwnProperty.call(block, "provider_overrides")) {
       delete block.provider_overrides;
@@ -297,13 +322,22 @@ export function readConfigOptions(cwd, env = process.env, warn = warnToStderr, b
           "envelope; the rest of the resolved search options still apply.",
       );
     }
-    if (Object.keys(block).length === 0) return undefined;
+    return cappedBlock(block, "search", "fields/providers lists", warn);
+  } catch {
+    return undefined;
+  }
+}
+
+// A non-empty block within the 4 KB cap, or undefined (dropped with a warning when over).
+function cappedBlock(block, name, trim, warn) {
+  try {
+    if (block === null || typeof block !== "object" || Object.keys(block).length === 0) return undefined;
     const bytes = Buffer.byteLength(JSON.stringify(block), "utf8");
     if (bytes > OPTIONS_MAX_BYTES) {
       warn(
-        `[telem] dropping the resolved search options: the composed block is ${bytes} bytes ` +
+        `[telem] dropping the resolved ${name} options: the composed block is ${bytes} bytes ` +
           `as compact JSON, over the ${OPTIONS_MAX_BYTES}-byte cap for the hosted lineage ` +
-          "envelope. Trim the .telem config (fields/providers lists) to restore it.",
+          `envelope. Trim the .telem config (${trim}) to restore it.`,
       );
       return undefined;
     }
@@ -334,10 +368,11 @@ export function readConfigOptions(cwd, env = process.env, warn = warnToStderr, b
 // A top-level turn keeps ancestors:[] — an ancestor is a delegation to a DIFFERENT
 // agent, which a turn is not.
 // `options` (hosted-options spec D1): the composed V2 `search` block from
-// readConfigOptions, attached as the envelope's `options` key when present. It rides
-// INSIDE the bridge — the model-facing tool schema gains nothing (D9), and updatedInput
-// still adds exactly one key.
-export function buildEnvelope(payload, windowId, history = [], options = undefined) {
+// readConfigBlocks, attached as the envelope's `options` key when present; `fetchOptions`
+// (hosted-fetch-options F4) rides as the top-level `fetch_options` key the same way. Both
+// ride INSIDE the bridge — the model-facing tool schema gains nothing (D9), and
+// updatedInput still adds exactly one key.
+export function buildEnvelope(payload, windowId, history = [], options = undefined, fetchOptions = undefined) {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
 
   const sessionId = payload.session_id;
@@ -380,6 +415,7 @@ export function buildEnvelope(payload, windowId, history = [], options = undefin
 
   const envelope = { v: ENVELOPE_VERSION, lineage };
   if (options !== undefined) envelope.options = options;
+  if (fetchOptions !== undefined) envelope.fetch_options = fetchOptions;
   return envelope;
 }
 
@@ -390,8 +426,8 @@ export function encodeBridge(envelope) {
 // The PreToolUse hookSpecificOutput, or null to emit nothing. updatedInput REPLACES
 // the whole tool input, so it MUST echo the original verbatim and add only
 // telem_bridge.
-export function buildHookOutput(payload, windowId, history = [], options = undefined) {
-  const envelope = buildEnvelope(payload, windowId, history, options);
+export function buildHookOutput(payload, windowId, history = [], options = undefined, fetchOptions = undefined) {
+  const envelope = buildEnvelope(payload, windowId, history, options, fetchOptions);
   if (envelope === null) return null;
   const telem_bridge = encodeBridge(envelope);
   return {
@@ -404,17 +440,18 @@ export function buildHookOutput(payload, windowId, history = [], options = undef
 
 // The full hot path: payload object -> the JSON string to print, or "" for "emit
 // nothing". Resolves window_id from the state file, then the .telem config into the
-// envelope's `options` (readConfigOptions fail-opens on its own — a config throw can
-// never take the "" path here, D8). The hook does not branch by tool: telem_fetch
-// calls carry options exactly as telem_search calls do (spec the contract). `env` is the
-// injectable seam for hermetic tests; the CLI path keeps process.env. Never throws.
+// envelope's `options` and `fetch_options` (readConfigBlocks fail-opens on its own — a
+// config throw can never take the "" path here, D8). The hook does not branch by tool:
+// telem_fetch and telem_search calls carry both blocks alike (spec the contract; hosted-fetch-options
+// F5). `env` is the injectable seam for hermetic tests; the CLI path keeps process.env.
+// Never throws.
 export function emit(payload, env = process.env) {
   try {
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return "";
     const windowId = readWindowId(payload.session_id);
     const history = readCurrentReasoning(payload);
-    const options = readConfigOptions(payload.cwd, env);
-    const out = buildHookOutput(payload, windowId, history, options);
+    const blocks = readConfigBlocks(payload.cwd, env);
+    const out = buildHookOutput(payload, windowId, history, blocks.options, blocks.fetchOptions);
     return out === null ? "" : JSON.stringify(out);
   } catch {
     return "";

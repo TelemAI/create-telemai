@@ -557,16 +557,28 @@ export function searchBlockFromConfig(env = process.env, projectRoot = undefined
 }
 
 /**
- * The search block for the HOSTED MCP bridge: the same block, plus
+ * The search builder for the HOSTED MCP bridge: the same block, plus
  * `auto_routing: "off"` when the user turned routing off. The router path drops
  * "off" (the router 422s it), but the hosted server routes by default, so this
  * channel has to say it.
  */
-export function hostedSearchBlockFromConfig(env = process.env, projectRoot = undefined, warn = console.error) {
-  const resolved = resolveAndWarn(env, projectRoot, warn)
+function buildHostedSearchBlock(resolved, env, warn) {
   const block = buildSearchBlock(resolved, env, warn)
   if (!resolved.autoRoutingOff) return block
   return { ...(block ?? {}), auto_routing: "off" }
+}
+
+/** The hosted search block alone: resolution plus the hosted search builder, no catch. */
+export function hostedSearchBlockFromConfig(env = process.env, projectRoot = undefined, warn = console.error) {
+  return buildHostedSearchBlock(resolveAndWarn(env, projectRoot, warn), env, warn)
+}
+
+/**
+ * Both blocks for the HOSTED bridge from ONE resolution — `blocksFromConfig` with the
+ * hosted search builder. The hooks' default `blocksSource` (hosted-fetch-options F5).
+ */
+export function hostedBlocksFromConfig(env = process.env, projectRoot = undefined, warn = console.error) {
+  return blocksFromConfig(env, projectRoot, warn, { search: buildHostedSearchBlock })
 }
 
 /**

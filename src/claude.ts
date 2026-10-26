@@ -76,6 +76,21 @@ export function readClaudePluginConfig(source: string | null): ClaudePluginConfi
   return { status: "parsed", value: parsed as Record<string, unknown> }
 }
 
+const isObj = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === "object" && !Array.isArray(v)
+
+/** The permission rule that turns off Claude Code's built-in web search tool. */
+export const CLAUDE_WEB_SEARCH_RULE = "WebSearch"
+
+/** True when settings.json already denies Claude Code's built-in `WebSearch`. */
+export function claudeWebSearchDenied(source: string | null): boolean {
+  const file = readClaudePluginConfig(source)
+  if (file.status !== "parsed") return false
+  const permissions = file.value.permissions
+  const deny = isObj(permissions) ? permissions.deny : undefined
+  return Array.isArray(deny) && deny.includes(CLAUDE_WEB_SEARCH_RULE)
+}
+
 export type ClaudePluginConfigEdit =
   | { status: "unchanged" }
   | { status: "write"; contents: string; created: boolean }
@@ -96,8 +111,6 @@ export function planClaudePluginConfig(source: string | null, apiKey: string, pa
       reason: `${path} is not valid JSON and will not be overwritten; fix or remove it, then re-run`,
     }
   }
-  const isObj = (v: unknown): v is Record<string, unknown> =>
-    !!v && typeof v === "object" && !Array.isArray(v)
   // settings.json is Claude's own file: preserve every sibling key, the whole
   // pluginConfigs map, our own entry's other fields, and options' other keys.
   const base: Record<string, unknown> = existing.status === "parsed" ? { ...existing.value } : {}
@@ -108,5 +121,35 @@ export function planClaudePluginConfig(source: string | null, apiKey: string, pa
   const nextOptions = { ...priorOptions, [CLAUDE_USER_CONFIG_KEY]: apiKey }
   const nextEntry = { ...priorEntry, options: nextOptions }
   const out = { ...base, pluginConfigs: { ...pluginConfigs, [CLAUDE_PLUGIN_REF]: nextEntry } }
+  return { status: "write", created: source === null, contents: `${JSON.stringify(out, null, 2)}\n` }
+}
+
+/**
+ * Add `"WebSearch"` to `permissions.deny`, so Claude Code's own web search is off and
+ * its searches go through Telem (owner design, 2026-10-26; the same step Codex has for
+ * `web_search = "disabled"`). Only with the user's consent, never as a side effect of
+ * installing. Every other key and every existing permission rule is PRESERVED, and the
+ * rule is added only when it is absent. A plugin cannot ship this rule itself: Claude
+ * Code keeps only `agent` and `subagentStatusLine` from a plugin's settings.
+ */
+export function planClaudeWebSearchDeny(source: string | null, path: string): ClaudePluginConfigEdit {
+  const existing = readClaudePluginConfig(source)
+  if (existing.status === "unparseable") {
+    return {
+      status: "unparseable",
+      reason: `${path} is not valid JSON and will not be overwritten; fix or remove it, then re-run`,
+    }
+  }
+  if (claudeWebSearchDenied(source)) return { status: "unchanged" }
+  const base: Record<string, unknown> = existing.status === "parsed" ? { ...existing.value } : {}
+  const permissions = isObj(base.permissions) ? { ...base.permissions } : {}
+  if (permissions.deny !== undefined && !Array.isArray(permissions.deny)) {
+    return {
+      status: "unparseable",
+      reason: `${path} has a permissions.deny that is not a list and will not be overwritten; fix it, then re-run`,
+    }
+  }
+  const deny = Array.isArray(permissions.deny) ? [...permissions.deny] : []
+  const out = { ...base, permissions: { ...permissions, deny: [...deny, CLAUDE_WEB_SEARCH_RULE] } }
   return { status: "write", created: source === null, contents: `${JSON.stringify(out, null, 2)}\n` }
 }

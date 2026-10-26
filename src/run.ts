@@ -30,7 +30,10 @@ import {
   CLAUDE_USER_CONFIG_KEY,
   claudeConfigDir,
   claudePluginConfigPath,
+  claudeWebSearchDenied,
   planClaudePluginConfig,
+  planClaudeWebSearchDeny,
+  type ClaudePluginConfigEdit,
 } from "./claude.ts"
 import { mergeTelemConfig } from "./configfile.ts"
 import type { CodexHookTrustEntry, HostedRouting } from "./codex.ts"
@@ -780,7 +783,7 @@ async function planSurfaces(
         planOpencode(ports, plan, home)
         break
       case "claude-code":
-        planClaudeCode(ports, plan, tools, home, context.apiKey)
+        await planClaudeCode(ports, flags, ui, plan, tools, home, context.apiKey)
         break
       case "codex":
         await planCodex(ports, flags, ui, plan, home, tools, context.apiKey, context.autoRouting)
@@ -895,13 +898,15 @@ function resolveClaudePluginDir(ports: Ports): string | null {
   return fromPorts || null
 }
 
-function planClaudeCode(
+async function planClaudeCode(
   ports: Ports,
+  flags: Flags,
+  ui: Ui | null,
   plan: Plan,
   tools: Record<string, ToolInfo>,
   home: string,
   apiKey: string | undefined,
-): void {
+): Promise<void> {
   const claude = tools.claude?.path
   const pluginDir = resolveClaudePluginDir(ports)
   const marketplaceAdd = ["claude", "plugin", "marketplace", "add", pluginDir ?? "<claude-plugin-telem dir>"]
@@ -941,26 +946,56 @@ function planClaudeCode(
   // the Claude config dir, never on argv. Staged like every other write, so
   // a cancelled run leaves it unwritten. Only staged when a key is configured; a
   // keyless run still installs the plugin (it just cannot authenticate yet).
-  if (apiKey) {
-    const configPath = claudePluginConfigPath(claudeConfigDir(ports.env, home))
-    const edit = planClaudePluginConfig(ports.readText(configPath), apiKey, configPath)
+  //
+  // The same file carries the second, consent-gated edit: "WebSearch" in
+  // permissions.deny, so Claude Code's own web search is off and its searches go
+  // through Telem (owner design, 2026-10-26; Codex's web_search step, below, is the
+  // model). Asked only here, once the plugin is going in — turning the built-in off
+  // without Telem installed would leave Claude Code with no web search at all — and
+  // skipped when the rule is already there: a Yes that changes nothing is noise.
+  const configPath = claudePluginConfigPath(claudeConfigDir(ports.env, home))
+  const source = ports.readText(configPath)
+  let contents = source
+  const reasons: string[] = []
+  const undo: string[] = []
+  const stage = (edit: ClaudePluginConfigEdit, reason: string, revert: string): boolean => {
     if (edit.status === "unparseable") {
       plan.notes.push(surfaceNote("claude-code", edit.reason))
       setOutcome(plan, "claude-code", "failed", edit.reason)
-      return
+      return false
     }
     if (edit.status === "write") {
-      addFile(plan, {
-        path: configPath,
-        contents: edit.contents,
-        secret: true,
-        created: edit.created,
-        reason: `store TELEM_API_KEY in the ${CLAUDE_PLUGIN_REF} plugin's userConfig`,
-        undo: edit.created
-          ? undoLine(configPath, true)
-          : `remove the "${CLAUDE_PLUGIN_REF}" entry from ${configPath}`,
-      })
+      contents = edit.contents
+      reasons.push(reason)
+      undo.push(revert)
     }
+    return true
+  }
+  if (apiKey) {
+    const keyed = planClaudePluginConfig(contents, apiKey, configPath)
+    if (!stage(keyed, `store TELEM_API_KEY in the ${CLAUDE_PLUGIN_REF} plugin's userConfig`, `remove the "${CLAUDE_PLUGIN_REF}" entry`)) return
+  }
+  const denyWebSearch = claudeWebSearchDenied(source)
+    ? false
+    : ui
+      ? await ui.confirm({
+          message: `Send Claude Code's web searches through Telem? (adds "WebSearch" to permissions.deny in ${abbreviateHome(configPath, home)})`,
+          initialValue: true,
+        })
+      : flags.claudeDisableWebSearch
+  if (denyWebSearch) {
+    const denied = planClaudeWebSearchDeny(contents, configPath)
+    if (!stage(denied, `add "WebSearch" to permissions.deny so Claude Code searches through Telem`, `remove "WebSearch" from permissions.deny`)) return
+  }
+  if (contents !== source && contents !== null) {
+    addFile(plan, {
+      path: configPath,
+      contents,
+      secret: true,
+      created: source === null,
+      reason: reasons.join("; "),
+      undo: source === null ? undoLine(configPath, true) : `${undo.join(" and ")} in ${configPath}`,
+    })
   }
 
   // Read-only probe: `claude plugin marketplace add`/`install` on an already

@@ -63,7 +63,9 @@ A Claude Code plugin's `settings.json` cannot ship `permissions.deny`, so this p
 does **not** disable Claude's builtin `WebSearch`. Tool preference is carried two ways
 instead: the tool descriptions themselves and the bundled `skills/telem/SKILL.md`.
 Disabling the builtin `WebSearch` (a `permissions.deny` write) is a separate,
-consent-gated step owned by `create-telemai`, not this plugin.
+consent-gated step owned by `create-telemai`, not this plugin: the installer asks
+before it adds `"WebSearch"` to `permissions.deny` in Claude Code's user
+`settings.json` (`--claude-disable-web-search` on a non-interactive run).
 
 ## License
 

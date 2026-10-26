@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Codex PreToolUse hook — telem reasoning capture + the hosted options channel.
 //
-// Two independent payloads ride one `telem_bridge` (built when reasoning OR
-// options exist — either half degrading must never suppress the other; spec
+// Three independent payloads ride one `telem_bridge` (built when reasoning OR
+// options OR fetch options exist — any part degrading must never suppress the others; spec
 // the design notes D8):
 //
 //  * REASONING — the reasoning SUMMARY (plaintext) that led to THIS telem_search /
@@ -20,9 +20,10 @@
 //
 // Degrade-never-fail: any problem => emit nothing (or emit without the failed
 // half); the tool call proceeds unchanged.
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-import { hostedSearchBlockFromConfig } from "./telem-config.mjs";
+import { hostedBlocksFromConfig } from "./telem-config.mjs";
 
 const HISTORY_TEXT_CAP = 128_000; // mirror of both MCP servers' _HISTORY_KEYS cap
 const OPTIONS_BLOCK_MAX_BYTES = 4096; // mirror of the hosted server's options cap (spec D4/D8)
@@ -99,33 +100,61 @@ function warn(message) {
   }
 }
 
-// The hosted options channel (spec D2/D3/D8): resolve the user's config over
-// project `<cwd>/.telem/telem.json` > user `~/.telem/telem.json` > `TELEM_*`
-// env — levels 5/6 only when the payload carries no cwd — compose it into the
-// V2 `search` block via the byte-identical vendored reader, then, ABOVE the
-// vendored copy: strip `provider_overrides` (excluded from this channel in v1,
-// D3) with one warning, and mirror the server's 4 KB cap so the honest path
-// warns instead of silently losing config. Own try/catch: a config failure
-// costs the options, NEVER the reasoning half of the bridge (D8's layering —
-// this must not sit bare inside an outer catch that kills lineage).
-function readConfigOptions(cwd, env = process.env) {
+// The hosted options channel (spec D2/D3/D8; hosted-fetch-options F4/F5): resolve the
+// user's config ONCE over project `<cwd>/.telem/telem.json` > user `~/.telem/telem.json`
+// > `TELEM_*` env — levels 5/6 only when the payload carries no cwd — into the V2
+// `search` block and the fetch block via the byte-identical vendored reader, then,
+// ABOVE the vendored copy: strip `provider_overrides` from the search block (excluded
+// from this channel in v1, D3) with one warning, and mirror the server's 4 KB cap per
+// block so the honest path warns instead of silently losing config — an oversized block
+// costs only itself. Own try/catch: a config failure costs both blocks with one warning,
+// NEVER the reasoning half of the bridge (D8's layering — this must not sit bare inside
+// an outer catch that kills lineage). Returns `{ options?, fetchOptions? }`.
+// `blocksSource` is a test seam only.
+export function readConfigBlocks(cwd, env = process.env, warnSink = warn, blocksSource = hostedBlocksFromConfig) {
+  let blocks;
   try {
     const projectRoot = typeof cwd === "string" && cwd ? cwd : undefined;
-    const block = hostedSearchBlockFromConfig(env, projectRoot, warn);
-    if (!block) return undefined;
+    blocks = blocksSource(env, projectRoot, warnSink);
+  } catch (error) {
+    warnSink(
+      `[telem] ignoring the Telem config: reading it failed (${error?.message || String(error)}), ` +
+        "so this call carries no search or fetch options.",
+    );
+    return {};
+  }
+  const out = {};
+  const options = searchOptionsOf(blocks?.search, warnSink);
+  if (options !== undefined) out.options = options;
+  const fetchOptions = cappedBlock(blocks?.fetch, "fetch", warnSink);
+  if (fetchOptions !== undefined) out.fetchOptions = fetchOptions;
+  return out;
+}
+
+function searchOptionsOf(block, warnSink) {
+  try {
+    if (!block || typeof block !== "object") return undefined;
     if (Object.prototype.hasOwnProperty.call(block, "provider_overrides")) {
       delete block.provider_overrides;
-      warn(
+      warnSink(
         "[telem] ignoring provider_overrides: it is not carried over the hosted options " +
           "channel in v1; the other resolved " +
           "options still apply.",
       );
     }
-    if (!Object.keys(block).length) return undefined;
+    return cappedBlock(block, "search", warnSink);
+  } catch {
+    return undefined; // fail-open: options are a bonus, never a gate
+  }
+}
+
+function cappedBlock(block, name, warnSink) {
+  try {
+    if (!block || typeof block !== "object" || !Object.keys(block).length) return undefined;
     const bytes = Buffer.byteLength(JSON.stringify(block), "utf8");
     if (bytes > OPTIONS_BLOCK_MAX_BYTES) {
-      warn(
-        `[telem] dropping the resolved search options: ${bytes} bytes of compact JSON ` +
+      warnSink(
+        `[telem] dropping the resolved ${name} options: ${bytes} bytes of compact JSON ` +
           `exceeds the ${OPTIONS_BLOCK_MAX_BYTES}-byte bridge cap, so this call runs on ` +
           "deployment defaults.",
       );
@@ -133,7 +162,7 @@ function readConfigOptions(cwd, env = process.env) {
     }
     return block;
   } catch {
-    return undefined; // fail-open: options are a bonus, never a gate
+    return undefined;
   }
 }
 
@@ -163,9 +192,9 @@ function main() {
     typeof rollout === "string" && rollout ? reasoningLeadingToThisCall(rollout) : "";
 
   // The options half: independently fail-open (its own try/catch inside).
-  const options = readConfigOptions(payload?.cwd);
+  const { options, fetchOptions } = readConfigBlocks(payload?.cwd);
 
-  if (!reasoning && !options) return; // nothing to carry => leave the call untouched
+  if (!reasoning && !options && !fetchOptions) return; // nothing to carry => leave the call untouched
 
   // `lineage` stays present even without history: the envelope parsers on both
   // servers require a dict there ({v: 1, lineage: {...}}), and an empty history
@@ -173,6 +202,7 @@ function main() {
   const envelope = { v: 1, lineage: {} };
   if (reasoning) envelope.lineage.history = [{ role: "assistant", reasoning }];
   if (options) envelope.options = options;
+  if (fetchOptions) envelope.fetch_options = fetchOptions;
   const bridge = b64url(envelope);
   // updatedInput is a FULL replacement of the arguments: spread ALL received keys verbatim,
   // add only telem_bridge. Never reconstruct queries/session_id/goal by hand.
@@ -188,4 +218,16 @@ function main() {
     }),
   );
 }
-main();
+// Only as the process entrypoint: importing this module (the tests) must not read stdin.
+// Real paths on both sides: Node resolves a symlinked entry for `import.meta.url`, so a
+// plugin directory reached through a symlink must still run the hook.
+function isMain() {
+  try {
+    const entry = process.argv[1];
+    return Boolean(entry) && realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMain()) main();
