@@ -55,7 +55,10 @@ whitelist and forwards it as the request's `search` block.
 
 Two v1 limits: `provider_overrides` does not ride this channel (stripped with a stderr
 warning), and the composed block caps at 4 KB. Config failures are fail-open — they
-cost the options, never the lineage, never the call.
+cost the options, never the lineage, never the call. The one exception: when
+`providersExclude` removes every provider in `providersInclude`, the hook denies a
+`telem_search` with a message naming where each list was set, because running it
+without the lists would search the default set (a `telem_fetch` still runs).
 
 ## Tool preference
 

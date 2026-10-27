@@ -20,10 +20,15 @@
 // replaces the whole object — probe-proven in
 // a host probe).
 //
-// FAIL-OPEN, ALWAYS. Any error, malformed/empty payload, or a missing session_id /
-// prompt_id / tool_input -> emit nothing and exit 0, so Claude Code proceeds with the
-// ORIGINAL input and the search still runs goal-only. A hook that emits nothing never
-// blocks a tool call. Zero dependencies (node built-ins only). No network. window_id
+// FAIL-OPEN, with ONE exception. Any error, malformed/empty payload, or a missing
+// session_id / prompt_id / tool_input -> emit nothing and exit 0, so Claude Code
+// proceeds with the ORIGINAL input and the search still runs goal-only. A hook that
+// emits nothing never blocks a tool call. The exception (owner design, 2026-10-26):
+// when the .telem config's providersExclude removes every provider in its
+// providersInclude, a telem_search is DENIED with the reason, because running it
+// without the provider lists would search the default set, which can hold the
+// provider the user excluded. A telem_fetch reads no provider lists and goes on, with
+// its fetch options. Zero dependencies (node built-ins only). No network. window_id
 // comes from the state file, not the transcript. The one transcript touch on the hot
 // path is a BOUNDED tail read for the turn's visible assistant text
 // (readCurrentReasoning): the last TAIL_BYTES only, fail-open to history:[], inside
@@ -48,7 +53,7 @@ import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { build_snapshot } from "./v5hash.mjs";
-import { hostedBlocksFromConfig } from "./telem-config.mjs";
+import { ConfigRefusal, fetchBlockFromConfig, hostedBlocksFromConfig } from "./telem-config.mjs";
 
 const HARNESS = "claude-code";
 const ENVELOPE_VERSION = 1;
@@ -279,35 +284,65 @@ function warnToStderr(message) {
 //      one warning naming the hosted surface, only when the key was actually present;
 //   3. each block on its own: drop it, with a warning, when its compact JSON exceeds
 //      OPTIONS_MAX_BYTES (D8 mirrors the server cap hook-side) — the other block stays;
-//   4. return `{ options?, fetchOptions? }`, each key present only when non-empty.
+//   4. return `{ options?, fetchOptions?, refusal? }`, each key present only when
+//      non-empty. `refusal` is set when the config can run no search (a ConfigRefusal:
+//      exclude removes every provider in include); then there is no search block, and
+//      the fetch block comes from its own resolution (`fetchSource`), so a telem_fetch
+//      keeps its fetch options.
 //
 // `cwd` comes from the PreToolUse payload; absent/non-string cwd -> the user + env
 // levels only (D2). `env`/`warn` are the injectable seams the tests need; production
 // callers pass (payload.cwd, env) and keep the defaults. `blocksSource` exists ONLY so
 // tests can drive the wrapper's own guards (a throwing reader, a lone block) — never pass
-// it in production code.
+// it in production code; `fetchSource` is the same kind of seam for the refusal path.
 //
 // OWN try/catch, deliberately (D8): emit's outer catch returns "" — the no-envelope
 // path — and a config failure must degrade to "lineage without options", never to
-// "no lineage". A resolution throw costs both blocks, with one warning. Never throws.
-export function readConfigBlocks(cwd, env = process.env, warn = warnToStderr, blocksSource = hostedBlocksFromConfig) {
+// "no lineage". A resolution throw costs both blocks, with one warning. A refusal is
+// returned, not thrown: emit turns it into a deny for telem_search. Never throws.
+export function readConfigBlocks(
+  cwd,
+  env = process.env,
+  warn = warnToStderr,
+  blocksSource = hostedBlocksFromConfig,
+  fetchSource = fetchBlockFromConfig,
+) {
+  const projectRoot = typeof cwd === "string" && cwd !== "" ? cwd : undefined;
   let blocks;
+  let refusal;
   try {
-    const projectRoot = typeof cwd === "string" && cwd !== "" ? cwd : undefined;
     blocks = blocksSource(env, projectRoot, warn);
   } catch (error) {
-    warn(
-      `[telem] ignoring the Telem config: reading it failed (${error?.message || String(error)}), ` +
-        "so this call carries no search or fetch options.",
-    );
-    return {};
+    if (!(error instanceof ConfigRefusal)) {
+      warn(
+        `[telem] ignoring the Telem config: reading it failed (${error?.message || String(error)}), ` +
+          "so this call carries no search or fetch options.",
+      );
+      return {};
+    }
+    refusal = error.message;
+    blocks = { search: null, fetch: fetchBlockAfterRefusal(fetchSource, env, projectRoot, warn) };
   }
-  const out = {};
+  const out = refusal === undefined ? {} : { refusal };
   const options = searchOptionsOf(blocks?.search, warn);
   if (options !== undefined) out.options = options;
   const fetchOptions = cappedBlock(blocks?.fetch, "fetch", "fetchProviders list", warn);
   if (fetchOptions !== undefined) out.fetchOptions = fetchOptions;
   return out;
+}
+
+// The fetch block when the search half refused: its own resolution, with the reader's
+// warnings silenced, because the first pass already printed them. Never throws.
+function fetchBlockAfterRefusal(fetchSource, env, projectRoot, warn) {
+  try {
+    return fetchSource(env, projectRoot, () => {});
+  } catch (error) {
+    warn(
+      `[telem] ignoring the fetch options in the Telem config: building them failed ` +
+        `(${error?.message || String(error)}), so this call carries none.`,
+    );
+    return null;
+  }
 }
 
 // The search block, ready for the envelope's `options`, or undefined. Never throws.
@@ -438,19 +473,35 @@ export function buildHookOutput(payload, windowId, history = [], options = undef
   };
 }
 
+// The PreToolUse output that refuses a call: Claude Code shows the reason to the model
+// and the tool call is not made.
+export function buildDenyOutput(reason) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: reason,
+    },
+  };
+}
+
 // The full hot path: payload object -> the JSON string to print, or "" for "emit
 // nothing". Resolves window_id from the state file, then the .telem config into the
 // envelope's `options` and `fetch_options` (readConfigBlocks fail-opens on its own — a
-// config throw can never take the "" path here, D8). The hook does not branch by tool:
-// telem_fetch and telem_search calls carry both blocks alike (spec the contract; hosted-fetch-options
-// F5). `env` is the injectable seam for hermetic tests; the CLI path keeps process.env.
-// Never throws.
+// config throw can never take the "" path here, D8; a config that refuses every search
+// denies a telem_search). The hook does not otherwise branch by tool: telem_fetch and
+// telem_search calls carry both blocks alike (spec the contract; hosted-fetch-options F5). `env`
+// is the injectable seam for hermetic tests; the CLI path keeps process.env. Never
+// throws.
 export function emit(payload, env = process.env) {
   try {
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return "";
+    const blocks = readConfigBlocks(payload.cwd, env);
+    if (blocks.refusal !== undefined && /telem_search$/.test(String(payload.tool_name))) {
+      return JSON.stringify(buildDenyOutput(blocks.refusal));
+    }
     const windowId = readWindowId(payload.session_id);
     const history = readCurrentReasoning(payload);
-    const blocks = readConfigBlocks(payload.cwd, env);
     const out = buildHookOutput(payload, windowId, history, blocks.options, blocks.fetchOptions);
     return out === null ? "" : JSON.stringify(out);
   } catch {

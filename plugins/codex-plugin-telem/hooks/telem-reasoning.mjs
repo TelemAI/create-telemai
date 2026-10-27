@@ -19,11 +19,17 @@
 //    and no client filesystem, so this bridge is its only path to user config.
 //
 // Degrade-never-fail: any problem => emit nothing (or emit without the failed
-// half); the tool call proceeds unchanged.
+// half); the tool call proceeds unchanged. ONE exception (owner design,
+// 2026-10-26): when the config's providersExclude removes every provider in its
+// providersInclude, a telem_search is DENIED with the reason (Codex requires a
+// non-empty permissionDecisionReason for a deny), because running it without the
+// provider lists would search the default set, which can hold the excluded
+// provider. A telem_fetch reads no provider lists and goes on, with its fetch
+// options.
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { hostedBlocksFromConfig } from "./telem-config.mjs";
+import { ConfigRefusal, fetchBlockFromConfig, hostedBlocksFromConfig } from "./telem-config.mjs";
 
 const HISTORY_TEXT_CAP = 128_000; // mirror of both MCP servers' _HISTORY_KEYS cap
 const OPTIONS_BLOCK_MAX_BYTES = 4096; // mirror of the hosted server's options cap (spec D4/D8)
@@ -109,26 +115,54 @@ function warn(message) {
 // block so the honest path warns instead of silently losing config — an oversized block
 // costs only itself. Own try/catch: a config failure costs both blocks with one warning,
 // NEVER the reasoning half of the bridge (D8's layering — this must not sit bare inside
-// an outer catch that kills lineage). Returns `{ options?, fetchOptions? }`.
-// `blocksSource` is a test seam only.
-export function readConfigBlocks(cwd, env = process.env, warnSink = warn, blocksSource = hostedBlocksFromConfig) {
+// an outer catch that kills lineage). Returns `{ options?, fetchOptions?, refusal? }`.
+// `refusal` is set when the config can run no search (a ConfigRefusal: exclude removes
+// every provider in include); then there is no search block, and the fetch block comes
+// from its own resolution, so a telem_fetch keeps its fetch options. main turns the
+// refusal into a deny for telem_search. `blocksSource`/`fetchSource` are test seams only.
+export function readConfigBlocks(
+  cwd,
+  env = process.env,
+  warnSink = warn,
+  blocksSource = hostedBlocksFromConfig,
+  fetchSource = fetchBlockFromConfig,
+) {
+  const projectRoot = typeof cwd === "string" && cwd ? cwd : undefined;
   let blocks;
+  let refusal;
   try {
-    const projectRoot = typeof cwd === "string" && cwd ? cwd : undefined;
     blocks = blocksSource(env, projectRoot, warnSink);
   } catch (error) {
-    warnSink(
-      `[telem] ignoring the Telem config: reading it failed (${error?.message || String(error)}), ` +
-        "so this call carries no search or fetch options.",
-    );
-    return {};
+    if (!(error instanceof ConfigRefusal)) {
+      warnSink(
+        `[telem] ignoring the Telem config: reading it failed (${error?.message || String(error)}), ` +
+          "so this call carries no search or fetch options.",
+      );
+      return {};
+    }
+    refusal = error.message;
+    blocks = { search: null, fetch: fetchBlockAfterRefusal(fetchSource, env, projectRoot, warnSink) };
   }
-  const out = {};
+  const out = refusal === undefined ? {} : { refusal };
   const options = searchOptionsOf(blocks?.search, warnSink);
   if (options !== undefined) out.options = options;
   const fetchOptions = cappedBlock(blocks?.fetch, "fetch", warnSink);
   if (fetchOptions !== undefined) out.fetchOptions = fetchOptions;
   return out;
+}
+
+// The fetch block when the search half refused: its own resolution, with the reader's
+// warnings silenced, because the first pass already printed them. Never throws.
+function fetchBlockAfterRefusal(fetchSource, env, projectRoot, warnSink) {
+  try {
+    return fetchSource(env, projectRoot, () => {});
+  } catch (error) {
+    warnSink(
+      `[telem] ignoring the fetch options in the Telem config: building them failed ` +
+        `(${error?.message || String(error)}), so this call carries none.`,
+    );
+    return null;
+  }
 }
 
 function searchOptionsOf(block, warnSink) {
@@ -191,8 +225,21 @@ function main() {
   const reasoning =
     typeof rollout === "string" && rollout ? reasoningLeadingToThisCall(rollout) : "";
 
-  // The options half: independently fail-open (its own try/catch inside).
-  const { options, fetchOptions } = readConfigBlocks(payload?.cwd);
+  // The options half: independently fail-open (its own try/catch inside), except a
+  // config that refuses every search, which denies a telem_search outright.
+  const { options, fetchOptions, refusal } = readConfigBlocks(payload?.cwd);
+  if (refusal !== undefined && typeof tool === "string" && tool.endsWith("telem_search")) {
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: refusal,
+        },
+      }),
+    );
+    return;
+  }
 
   if (!reasoning && !options && !fetchOptions) return; // nothing to carry => leave the call untouched
 
