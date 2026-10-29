@@ -47,9 +47,23 @@
 // Getting the hash wrong is FAIL-SAFE: a stale hash reads as `modified`, the hook is
 // skipped, and the user is exactly where they would be with no pre-grant at all — so
 // the run also prints how to trust it by hand.
+//
+// ── Content trust (Codex 0.164) ──────────────────────────────────────────────────
+//
+// Codex also pins a plugin hook to the plugin's installed FILES: approving it in the
+// TUI writes `trusted_content_hash` beside `trusted_hash`, a fingerprint of the copy
+// `codex plugin add` makes under `<CODEX_HOME>/plugins/cache/<marketplace>/<plugin>/
+// <version>`. An entry with no content hash is pinned to whatever content Codex sees
+// first (a baseline file in `<CODEX_HOME>/.hook-trust/`), so the next plugin update
+// reads as `modified` and the hook is skipped until the user approves it again —
+// silently, under `codex exec`. So the installer also writes `trusted_content_hash`,
+// but ONLY for files it ships: the fingerprint of its own plugin dir, and only when
+// Codex's cached copy is (or is about to be) a copy of that dir (`planCodexPlugin`).
+// A local install copies the dir byte for byte, so the two fingerprints are equal.
 
 import { createHash } from "node:crypto"
-import { join } from "node:path"
+import { lstatSync, readdirSync, readFileSync } from "node:fs"
+import { basename, join, relative } from "node:path"
 
 import type { CodexHookTrustEntry } from "./codex.ts"
 
@@ -206,6 +220,61 @@ export function codexHookTrustEntries(
     }
   }
   return entries.length ? entries : null
+}
+
+/** Where `codex plugin add` puts its copy of a plugin, whose files Codex fingerprints. */
+export function codexPluginCacheDir(codexHome: string, version: string): string {
+  return join(codexHome, "plugins", "cache", CODEX_MARKETPLACE, CODEX_PLUGIN, version)
+}
+
+/** Entries Codex leaves out of the fingerprint, by name: generated Python files. */
+function fingerprintSkips(name: string): boolean {
+  return name === "__pycache__" || name === ".venv" || name.endsWith(".pyc") || name.endsWith(".egg-info")
+}
+
+function u64le(value: number): Buffer {
+  const bytes = Buffer.alloc(8)
+  bytes.writeBigUInt64LE(BigInt(value))
+  return bytes
+}
+
+/**
+ * Codex's fingerprint of a plugin's files, `sha256:<hex>`: a port of
+ * `plugin_content_hash` (codex-rs/hooks/src/engine/plugin_fingerprint.rs, 0.164).
+ *
+ * Depth-first from the root, children in byte order of their names; each entry adds
+ * its path relative to the root (length-prefixed, the platform's separators, the root
+ * itself as ""), then "directory", or "file" with the length and the bytes. `null` when
+ * Codex would refuse the tree too (a symlink or any entry that is neither a file nor a
+ * directory) or it cannot be read: the caller then vouches for nothing.
+ */
+export function codexPluginContentHash(root: string): string | null {
+  try {
+    if (!lstatSync(root).isDirectory()) return null
+    const hash = createHash("sha256").update("codex-plugin-bundle-v1")
+    const pending = [root]
+    while (pending.length) {
+      const path = pending.pop() as string
+      const rel = path === root ? "" : relative(root, path)
+      if (rel && fingerprintSkips(basename(rel))) continue
+      const name = Buffer.from(rel, "utf8")
+      hash.update(u64le(name.length)).update(name)
+      const stat = lstatSync(path)
+      if (stat.isDirectory()) {
+        hash.update("directory")
+        const children = readdirSync(path).sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))
+        for (let index = children.length - 1; index >= 0; index -= 1) pending.push(join(path, children[index]))
+      } else if (stat.isFile()) {
+        const data = readFileSync(path)
+        hash.update("file").update(u64le(data.length)).update(data)
+      } else {
+        return null
+      }
+    }
+    return `sha256:${hash.digest("hex")}`
+  } catch {
+    return null
+  }
 }
 
 /** `telem@telem  installed, enabled  0.1.0  /path` → `"0.1.0"`; null when not installed. */

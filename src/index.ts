@@ -12,6 +12,7 @@ import { realpathSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
+import { codexPluginContentHash } from "./codex-plugin.ts"
 import { exec } from "./exec.ts"
 import { existsSync, readTextSync } from "./fsops.ts"
 import { run } from "./run.ts"
@@ -101,6 +102,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     loadUi: loadClackUi,
     claudePluginDir: resolveClaudePluginDir(),
     codexPluginDir: resolveCodexPluginDir(),
+    pluginContentHash: codexPluginContentHash,
   })
 }
 

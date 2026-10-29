@@ -21,7 +21,7 @@
 //        which the Claude Code plugin's inline MCP server reads.
 
 import { realpathSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import { credentialsPath, resolveTelemDir, userConfigPath } from "../config-core/files.ts"
 import {
@@ -43,6 +43,7 @@ import {
   CODEX_URL,
   ROUTING_HEADER,
   classifyCodexTelemTable,
+  codexMarketplaceSource,
   codexWebSearchDisabled,
   hostedRouting,
   planCodexConfig,
@@ -55,10 +56,12 @@ import {
   planCodexLegacyHooksRemoval,
 } from "./codex-legacy-hooks.ts"
 import {
+  CODEX_MARKETPLACE,
   CODEX_PLUGIN_HOOKS_REL,
   CODEX_PLUGIN_REF,
   codexHomeDir,
   codexHookTrustEntries,
+  codexPluginCacheDir,
   codexPluginVersion,
   installedCodexPluginVersion,
 } from "./codex-plugin.ts"
@@ -156,6 +159,12 @@ export type Ports = {
    * local Codex marketplace. `TELEM_CODEX_PLUGIN_DIR` overrides it.
    */
   codexPluginDir?: string
+  /**
+   * Codex's fingerprint of a plugin directory's files (`codexPluginContentHash`), or
+   * null when it cannot be taken. Filled in by index.ts; without it the run writes no
+   * `trusted_content_hash` and Codex pins the hook to the first content it sees.
+   */
+  pluginContentHash?: (dir: string) => string | null
 }
 
 export type Summary = {
@@ -1453,8 +1462,38 @@ async function planCodexPlugin(
   const installedVersion = installedCodexPluginVersion(listed.status === 0 ? listed.stdout : "")
   const packagedVersion = codexPluginVersion(ports.readText(join(pluginDir, ".codex-plugin", "plugin.json")))
   const upToDate = installedVersion !== null && packagedVersion !== null && installedVersion === packagedVersion
+
+  // ── content trust: vouch only for files this run ships (see codex-plugin.ts) ────
+  // Codex fingerprints its cached copy of the plugin, so `trusted_content_hash` is the
+  // fingerprint of OUR plugin dir, written only when that copy is or will be ours:
+  //   * up to date: the cached copy of the installed version already fingerprints
+  //     the same (this also repairs a hook left `modified` by an earlier update);
+  //   * installing: the telem marketplace is unregistered or registered from this very
+  //     dir. Registered from anywhere else, `marketplace add` refuses and nothing is
+  //     installed, so there is nothing of ours to vouch for.
+  // Like the hook hash, a wrong value fails safe: the hook reads `modified` and is
+  // skipped until the user trusts it. The one way to get there is an install command
+  // that fails after config.toml is written, and that run reports the failure.
+  const packagedContent = ports.pluginContentHash?.(pluginDir) ?? null
+  let vouch = false
+  if (packagedContent !== null) {
+    if (upToDate) {
+      vouch = ports.pluginContentHash?.(codexPluginCacheDir(codexHome, installedVersion)) === packagedContent
+    } else {
+      const registered = codexMarketplaceSource(ports.readText(join(codexHome, "config.toml")), CODEX_MARKETPLACE)
+      vouch =
+        registered.status === "absent" ||
+        (registered.status === "registered" &&
+          registered.sourceType === "local" &&
+          registered.source !== null &&
+          resolve(registered.source) === resolve(pluginDir))
+    }
+  }
+  const trust =
+    vouch && packagedContent !== null ? hookTrust.map((entry) => ({ ...entry, contentHash: packagedContent })) : hookTrust
+
   if (upToDate) {
-    return { status: "ok", hookTrust, commands: [], writes, removals, notes, changes }
+    return { status: "ok", hookTrust: trust, commands: [], writes, removals, notes, changes }
   }
   const commands: PlannedCommand[] = [
     {
@@ -1471,7 +1510,7 @@ async function planCodexPlugin(
     },
   ]
   changes.push(`install the ${CODEX_PLUGIN_REF} Codex plugin`)
-  return { status: "ok", hookTrust, commands, writes, removals, notes, changes }
+  return { status: "ok", hookTrust: trust, commands, writes, removals, notes, changes }
 }
 
 function planHermes(ports: Ports, plan: Plan, tools: Record<string, ToolInfo>, home: string): void {
@@ -2166,10 +2205,14 @@ async function finish(
     const context = errorContextFor(result.command)
     const translated = context ? translateInstallError(context, raw) : null
     const detail =
-      translated ??
-      `${result.command.argv[0]} exited ${result.status ?? "abnormally"}${
-        raw ? `: ${failureLine(raw)}` : ""
-      }`
+      (translated ??
+        `${result.command.argv[0]} exited ${result.status ?? "abnormally"}${
+          raw ? `: ${failureLine(raw)}` : ""
+        }`) +
+      // config.toml (with the hook's trust) landed before this command ran.
+      (outcomeId === "codex" && result.command.argv[1] === "plugin"
+        ? "; until the telem plugin installs, Codex may skip its reasoning hook: re-run, or trust the hook in Codex's /plugin UI"
+        : "")
     // One failure, one report. The surface row already carries the id and the detail,
     // so pushing the same text into `warnings` printed it a second time in the same
     // summary. `python` is the exception: it is a pseudo-surface with no row of its

@@ -605,9 +605,10 @@ function reconcileHostedRouting(
   return outcome
 }
 
-/** One pre-granted hook trust entry: Codex's own hook key, and its current hash.
- * Produced by codex-plugin.ts, which is where the derivation is explained. */
-export type CodexHookTrustEntry = { key: string; hash: string }
+/** One pre-granted hook trust entry: Codex's own hook key, its current hash, and,
+ * when the installer can vouch for the installed files, their content fingerprint.
+ * Produced by codex-plugin.ts and run.ts, which is where the derivations are explained. */
+export type CodexHookTrustEntry = { key: string; hash: string; contentHash?: string }
 
 /**
  * A key safe to write as a TOML quoted key. Hook keys are built by us out of a
@@ -668,15 +669,18 @@ function definesHooksUnrecognizably(lines: readonly TomlLine[]): boolean {
 /**
  * Write (or reconcile) the pre-granted hook trust entries.
  *
- * Absent entry → a new table appended at the end, `enabled = true` and the hash.
- * Present entry → ONLY `trusted_hash` is rewritten, and only when it differs: an
- * `enabled = false` the user set in Codex's UI is their decision and survives, and a
- * hash that already matches is left byte-identical so a re-run stages nothing.
+ * Absent entry → a new table appended at the end: `enabled = true`, the hash, and the
+ * content hash when the entry carries one.
+ * Present entry → ONLY `trusted_hash` (and `trusted_content_hash`, when the entry
+ * carries one) is rewritten, and only when it differs: an `enabled = false` the user
+ * set in Codex's UI is their decision and survives, and a value that already matches is
+ * left byte-identical so a re-run stages nothing. An entry with no content hash leaves
+ * any `trusted_content_hash` in the file alone: that is the user's own approval.
  *
  * Anything this line editor cannot safely rewrite — any definition of `hooks` or
  * `hooks.state` in a shape we did not write (see `definesHooksUnrecognizably`), a
- * multi-line `trusted_hash` — is ABSTAINED rather than clobbered, and the caller tells
- * the user to trust the hook in the `/plugin` UI instead.
+ * multi-line value — is ABSTAINED rather than clobbered, and the caller tells the user
+ * to trust the hook in the `/plugin` UI instead.
  *
  * Mutates `lines`; returns what happened.
  */
@@ -692,7 +696,25 @@ function applyHookTrust(
   // then refuses the ENTIRE config.toml.
   const foreignState = definesHooksUnrecognizably(lines)
   for (const entry of entries) {
-    if (!HOOK_KEY_SAFE.test(entry.key) || !HOOK_KEY_SAFE.test(entry.hash)) {
+    // The pairs this entry vouches for, in the order a new table lists them: the hook's
+    // definition always, the plugin's installed files only when the caller fingerprinted them.
+    const pairs: Array<{ key: string; value: string; added: string; changed: string }> = [
+      {
+        key: "trusted_hash",
+        value: entry.hash,
+        added: "trust the telem Codex hook",
+        changed: "re-trust the telem Codex hook (its hook definition changed)",
+      },
+    ]
+    if (entry.contentHash !== undefined) {
+      pairs.push({
+        key: "trusted_content_hash",
+        value: entry.contentHash,
+        added: "trust the telem Codex plugin's installed files",
+        changed: "re-trust the telem Codex plugin's installed files (they changed)",
+      })
+    }
+    if (!HOOK_KEY_SAFE.test(entry.key) || pairs.some((pair) => !HOOK_KEY_SAFE.test(pair.value))) {
       abstained = true
       continue
     }
@@ -712,47 +734,53 @@ function applyHookTrust(
         parts,
       })
       lines.push({ kind: "pair", text: "enabled = true", key: "enabled", parts: ["enabled"] })
-      lines.push({
-        kind: "pair",
-        text: `trusted_hash = "${entry.hash}"`,
-        key: "trusted_hash",
-        parts: ["trusted_hash"],
-      })
+      for (const pair of pairs) {
+        lines.push({ kind: "pair", text: `${pair.key} = "${pair.value}"`, key: pair.key, parts: [pair.key] })
+      }
       changes.push("trust the telem Codex hook")
       written = true
       continue
     }
-    const end = tableSpanEnd(lines, headerIdx)
-    const hashIdx = lines.findIndex(
-      (line, index) => index > headerIdx && index < end && line.kind === "pair" && isKeyPath(line.parts, ["trusted_hash"]),
-    )
-    if (hashIdx === -1) {
-      lines.splice(headerIdx + 1, 0, {
-        kind: "pair",
-        text: `trusted_hash = "${entry.hash}"`,
-        key: "trusted_hash",
-        parts: ["trusted_hash"],
-      })
-      changes.push("trust the telem Codex hook")
-      written = true
-      continue
+    const pairIndex = (key: string) => {
+      const end = tableSpanEnd(lines, headerIdx)
+      return lines.findIndex(
+        (line, index) => index > headerIdx && index < end && line.kind === "pair" && isKeyPath(line.parts, [key]),
+      )
     }
-    if (lines[hashIdx + 1]?.kind === "continuation") {
+    // A multi-line value is not ours to rewrite: decide before touching anything, so an
+    // entry is either reconciled whole or left exactly as it was.
+    const multiLine = pairs.some((pair) => {
+      const index = pairIndex(pair.key)
+      return index !== -1 && lines[index + 1]?.kind === "continuation"
+    })
+    if (multiLine) {
       abstained = true
       continue
     }
-    if (stringValue(currentValue(lines[hashIdx].text)) === entry.hash) continue
-    lines[hashIdx] = {
-      kind: "pair",
-      key: "trusted_hash",
-      parts: ["trusted_hash"],
-      text: replaceValue(lines[hashIdx].text, `"${entry.hash}"`),
+    let after = headerIdx
+    for (const pair of pairs) {
+      const index = pairIndex(pair.key)
+      if (index === -1) {
+        lines.splice(after + 1, 0, { kind: "pair", text: `${pair.key} = "${pair.value}"`, key: pair.key, parts: [pair.key] })
+        after += 1
+        changes.push(pair.added)
+        written = true
+        continue
+      }
+      after = index
+      if (stringValue(currentValue(lines[index].text)) === pair.value) continue
+      lines[index] = {
+        kind: "pair",
+        key: pair.key,
+        parts: [pair.key],
+        text: replaceValue(lines[index].text, `"${pair.value}"`),
+      }
+      changes.push(pair.changed)
+      written = true
     }
-    changes.push(`re-trust the telem Codex hook (its hook definition changed)`)
-    written = true
   }
-  // Every entry that did not abstain is now present with the right hash — either it
-  // already was (the loop `continue`d) or this pass wrote it.
+  // Every entry that did not abstain is now present with the right values — either they
+  // already were (nothing to do) or this pass wrote them.
   return { written, abstained, satisfied: entries.length > 0 && !abstained }
 }
 
@@ -775,6 +803,52 @@ export function classifyCodexTelemTable(source: string | null): CodexTelemForm {
   // A table with neither key (empty, or something exotic) is treated as remote —
   // "already present, do not clobber" — the same conservative stance as before.
   return "remote"
+}
+
+/** Where a Codex plugin marketplace is registered from, as `[marketplaces.<name>]` says. */
+export type CodexMarketplaceSource =
+  | { status: "absent" }
+  | { status: "registered"; sourceType: string | null; source: string | null }
+  | { status: "unknown" }
+
+/**
+ * Where `codex plugin marketplace add` registered the marketplace `name` from: the
+ * `[marketplaces.<name>]` table it writes, with `source_type` and `source` as single-line
+ * strings. `absent` when nothing in the file defines it; `unknown` for a file that will
+ * not scan or any other spelling (a dotted key, an inline table), which a caller must
+ * treat as "registered somewhere else".
+ */
+export function codexMarketplaceSource(source: string | null, name: string): CodexMarketplaceSource {
+  if (source === null) return { status: "absent" }
+  const scan = scanToml(source)
+  if (!scan.ok) return { status: "unknown" }
+  const lines = scan.lines
+  const headerIdx = lines.findIndex((line) => line.kind === "header" && isKeyPath(line.parts, ["marketplaces", name]))
+  if (headerIdx === -1) {
+    // `marketplaces.<name>` can also be defined by a pair, at the root or under a
+    // `[marketplaces]` header; neither is the shape Codex writes, so it is not read.
+    let header: readonly string[] = []
+    for (const line of lines) {
+      if (line.kind === "header") header = line.parts
+      else if (line.kind === "pair") {
+        const path = [...header, ...line.parts]
+        if (path[0] === "marketplaces" && path[1] === name) return { status: "unknown" }
+      }
+    }
+    return { status: "absent" }
+  }
+  const end = lines.findIndex((line, index) => index > headerIdx && line.kind === "header")
+  const own = lines.slice(headerIdx + 1, end === -1 ? lines.length : end)
+  const read = (key: string): string | null => {
+    const index = own.findIndex((line) => line.kind === "pair" && isKeyPath(line.parts, [key]))
+    if (index === -1 || own[index + 1]?.kind === "continuation") return null
+    const raw = currentValue(own[index].text)
+    const value = stringValue(raw)
+    // A basic string escapes `\` and `"` (a Windows path); any other escape stays as
+    // written, which can only make a comparison fail, never pass.
+    return value !== null && raw.trim().startsWith('"') ? value.replace(/\\(["\\])/g, "$1") : value
+  }
+  return { status: "registered", sourceType: read("source_type"), source: read("source") }
 }
 
 /**
