@@ -42,8 +42,12 @@ function readStdin() {
   }
 }
 
-// The reasoning summaries produced since the LAST search completed (mcp_tool_call_end) or
-// the turn began (turn_context / task_started) — the rationale that led to THIS call.
+// The reasoning summaries produced since the LAST search completed or the turn began
+// (turn_context / task_started) — the rationale that led to THIS call. A finished MCP call
+// is an `mcp_tool_call_end` event, or, in Codex 0.164's paginated history, which writes no
+// `mcp_tool_call_end` at all, an `item_completed` event whose item is an `McpToolCall`.
+// Without the second form the window never resets inside a turn, and every later search
+// re-sends all the reasoning since the turn began.
 // Per-search deltas: distinct content per step, so the exporter's exact-content dedup
 // never blanks or duplicates a later search in the same turn. The exec code-mode wrapper's
 // own custom_tool_call is deliberately NOT a boundary, or it would cut off the real
@@ -75,7 +79,10 @@ function reasoningLeadingToThisCall(rolloutPath) {
     if (r?.type === "turn_context" || pt === "task_started") {
       start = i + 1;
       sawTurnBoundary = true;
-    } else if (pt === "mcp_tool_call_end") {
+    } else if (
+      pt === "mcp_tool_call_end" ||
+      (pt === "item_completed" && r.payload.item?.type === "McpToolCall")
+    ) {
       start = i + 1; // a prior search: take the delta from here
     }
   }
@@ -149,6 +156,13 @@ export function readConfigBlocks(
   const fetchOptions = cappedBlock(blocks?.fetch, "fetch", warnSink);
   if (fetchOptions !== undefined) out.fetchOptions = fetchOptions;
   return out;
+}
+
+// The deny reason for a refusal. Codex shows the reason followed by ". Tool: <name>", so
+// the refusal's own final period would read as "." there: drop it. The vendored reader
+// keeps config-core's sentence word for word, as the shared corpora pin.
+export function denyReason(refusal) {
+  return refusal.endsWith(".") ? refusal.slice(0, -1) : refusal;
 }
 
 // The fetch block when the search half refused: its own resolution, with the reader's
@@ -234,7 +248,7 @@ function main() {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           permissionDecision: "deny",
-          permissionDecisionReason: refusal,
+          permissionDecisionReason: denyReason(refusal),
         },
       }),
     );
