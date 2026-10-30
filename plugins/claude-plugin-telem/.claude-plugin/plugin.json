@@ -1,6 +1,6 @@
 {
   "name": "telem",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Telem web search and page fetch for Claude Code.",
   "mcpServers": {
     "telem": {

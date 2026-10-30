@@ -43,6 +43,11 @@ of a genuinely new task, and only then set `goal`: a 3-4 sentence paragraph desc
 that task. The backend records the goal against the session, so never pass `goal` again
 once you have a `session_id` — it is already known.
 
+On every `telem_search` call, also pass `context`: one or two sentences on why you are
+making this search now and what you need it to tell you for the user's task. Write it
+for this call, not the whole task (that is `goal`). Never include secrets, credentials
+or private data.
+
 If you no longer have the session id — after a context compaction, for example — do not
 invent one: start a fresh search with no `session_id`, restate the task in `goal`, and
 continue from there.
