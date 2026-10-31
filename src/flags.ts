@@ -26,6 +26,8 @@ export type Flags = {
   codexDisableWebSearch: boolean
   /** Non-interactive consent to add "WebSearch" to Claude Code's permissions.deny. */
   claudeDisableWebSearch: boolean
+  /** Non-interactive consent to set tools.web_search.mode = "off" in Muse's settings.json. */
+  museDisableWebSearch: boolean
   /** Non-interactive consent to set disable_web_search = true in Grok Build's config. */
   grokDisableWebSearch: boolean
   /** Non-interactive consent to let Grok Build run the two Telem tools without asking. */
@@ -55,6 +57,7 @@ const EMPTY: Flags = {
   project: false,
   codexDisableWebSearch: false,
   claudeDisableWebSearch: false,
+  museDisableWebSearch: false,
   grokDisableWebSearch: false,
   grokAllowTelem: false,
   // ON by default: reasoning capture only adds capture, it disables nothing.
@@ -157,6 +160,9 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
       case "--claude-disable-web-search":
         flags.claudeDisableWebSearch = true
         break
+      case "--muse-disable-web-search":
+        flags.museDisableWebSearch = true
+        break
       case "--grok-disable-web-search":
         flags.grokDisableWebSearch = true
         break
@@ -226,6 +232,7 @@ export function ignoredInteractiveFlags(flags: Flags): string[] {
   if (flags.project) ignored.push("--project (the wizard asks about the project config)")
   if (flags.codexDisableWebSearch) ignored.push("--codex-disable-web-search (the wizard asks)")
   if (flags.claudeDisableWebSearch) ignored.push("--claude-disable-web-search (the wizard asks)")
+  if (flags.museDisableWebSearch) ignored.push("--muse-disable-web-search (the wizard asks)")
   if (flags.grokDisableWebSearch) ignored.push("--grok-disable-web-search (the wizard asks)")
   if (flags.grokAllowTelem) ignored.push("--grok-allow-telem (the wizard asks)")
   if (flags.codexMigrateHooks) ignored.push("--codex-migrate-hooks (the wizard asks)")
@@ -269,6 +276,9 @@ Flags (they double as the non-interactive API):
   --codex-disable-web-search    also set web_search = "disabled" in Codex's config
   --claude-disable-web-search   also add "WebSearch" to permissions.deny in Claude
                                 Code's settings.json
+  --muse-disable-web-search     also set tools.web_search.mode = "off" in Muse's
+                                settings.json (turns off Muse's own web search
+                                and web fetch)
   --grok-disable-web-search     also set disable_web_search = true in Grok Build's
                                 config.toml (its own web search and fetch; X
                                 search stays)
@@ -306,7 +316,7 @@ pass --dry-run, and the machine is untouched. The commit is not atomic across
 files, though — if it fails part way it names the files that already landed.
 
 The API key never goes on a command line and is never printed. It is written to
-at most four files, all 0600 — which of them depends on what you install:
+at most five files, all 0600 — which of them depends on what you install:
   ~/.telem/credentials.json   always; every surface falls back to it
   ~/.codex/config.toml        with --client codex: the Authorization header of
                               [mcp_servers.telem], which the hosted Telem MCP
@@ -314,4 +324,7 @@ at most four files, all 0600 — which of them depends on what you install:
   ~/.grok/config.toml         with --client grok: the same header, for Grok Build
   ~/.claude/settings.json     with --client claude-code:
                               pluginConfigs["telem@telem"].options.TELEM_API_KEY,
-                              which the plugin's inline MCP server reads`
+                              which the plugin's inline MCP server reads
+  ~/.config/muse/settings.json  with --client muse: the Authorization header of
+                              mcpServers.telem, which the hosted Telem MCP
+                              authenticates per request`

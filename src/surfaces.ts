@@ -23,6 +23,7 @@ export type SurfaceId =
   | "pi"
   | "openclaw"
   | "hermes"
+  | "muse"
   | "claude-skill"
   | "mcp-json"
 
@@ -123,6 +124,16 @@ export const SURFACES: readonly Surface[] = [
     hint: "Adds Telem search to Hermes Agent",
     // Hermes installs telem-sdk into its OWN managed environment when the plugin is
     // enabled, so nothing Python-side is needed on this machine.
+    needsPython: false,
+  },
+  {
+    id: "muse",
+    label: "Muse CLI",
+    group: "Agent hosts",
+    probe: "muse",
+    hint: "Adds Telem search to Muse CLI, and records its reasoning",
+    // The hosted remote, like Codex: a url + an auth header in settings.json, and a
+    // user hook run by node. No local telem-mcp, so no Python.
     needsPython: false,
   },
   {

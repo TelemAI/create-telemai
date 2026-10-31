@@ -104,6 +104,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     codexPluginDir: resolveCodexPluginDir(),
     pluginContentHash: codexPluginContentHash,
     // The package root (see resolvePluginDir): src/ and dist/ both sit one level down.
+    museDir: join(dirname(dirname(fileURLToPath(import.meta.url))), "muse"),
     grokDir: join(dirname(dirname(fileURLToPath(import.meta.url))), "grok"),
   })
 }

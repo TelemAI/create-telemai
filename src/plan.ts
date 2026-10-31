@@ -118,8 +118,9 @@ function realSecrets(secrets: readonly string[]): string[] {
  * The invariant these guards enforce is about CHANNELS, not files: the key never
  * reaches argv and is never printed. Which FILES may hold it is a separate, smaller
  * list — ~/.telem/credentials.json, the hosted Codex table's `http_headers` in
- * ~/.codex/config.toml, and the Claude plugin's `pluginConfigs` entry in
- * ~/.claude/settings.json (`keyTargetFiles` in run.ts is the one list) — all three
+ * ~/.codex/config.toml, the Claude plugin's `pluginConfigs` entry in
+ * ~/.claude/settings.json, and the hosted Muse server's headers in
+ * ~/.config/muse/settings.json (`keyTargetFiles` in run.ts is the one list) — all four
  * written at 0600. So the guard has to cover
  * every channel the run writes to the terminal, not just argv. A warning built from
  * a command's stderr, or a summary field, is exactly the kind of place a key could

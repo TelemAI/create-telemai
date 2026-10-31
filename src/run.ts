@@ -11,7 +11,7 @@
 //  * THE KEY NEVER GOES ON A COMMAND LINE AND IS NEVER PRINTED. No argv, no note,
 //    no warning, no summary field ever carries it; `assertNoSecretInCommands` and
 //    `assertNoSecretInText` turn that from a convention into a check.
-//    It reaches at most four FILES, all written 0600, and which of them depends on
+//    It reaches at most five FILES, all written 0600, and which of them depends on
 //    the surfaces selected (`keyTargetFiles` is the one list):
 //      ~/.telem/credentials.json — every surface falls back to it;
 //      ~/.codex/config.toml — the `http_headers` Authorization line of
@@ -19,7 +19,9 @@
 //        and has no credentials.json to read;
 //      ~/.grok/config.toml — the same line for Grok Build, spelled `headers`;
 //      ~/.claude/settings.json — pluginConfigs["telem@telem"].options.TELEM_API_KEY,
-//        which the Claude Code plugin's inline MCP server reads.
+//        which the Claude Code plugin's inline MCP server reads;
+//      ~/.config/muse/settings.json — the Authorization header of mcpServers.telem,
+//        for the same reason as Codex.
 
 import { realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
@@ -37,6 +39,16 @@ import {
   type ClaudePluginConfigEdit,
 } from "./claude.ts"
 import { mergeTelemConfig } from "./configfile.ts"
+import {
+  MUSE_HOOK_FILE,
+  MUSE_URL,
+  museConfigDir,
+  museSessionsDir,
+  museSettingsPath,
+  museUndoLine,
+  museWebSearchOff,
+  planMuseSettings,
+} from "./muse.ts"
 import type { CodexHookTrustEntry, HostedRouting } from "./codex.ts"
 import {
   CODEX_HOOK_STATE_PATH,
@@ -170,6 +182,12 @@ export type Ports = {
    * hand. `TELEM_CLAUDE_PLUGIN_DIR` in the env overrides it (the E2E gate path).
    */
   claudePluginDir?: string
+  /**
+   * Absolute path to this package's `muse/` directory: the Muse hook and the Muse
+   * skill, which the Muse planner copies into Muse's config directory. Filled in by
+   * index.ts; without it the Muse surface installs the server alone.
+   */
+  museDir?: string
   /**
    * The same thing for the sibling plugin, which the Codex surface registers as a
    * local Codex marketplace. `TELEM_CODEX_PLUGIN_DIR` overrides it.
@@ -830,6 +848,9 @@ async function planSurfaces(
       case "hermes":
         planHermes(ports, plan, tools, home)
         break
+      case "muse":
+        await planMuse(ports, flags, ui, plan, home, context.apiKey, context.autoRouting)
+        break
       case "claude-skill":
         planClaudeSkill(plan, tools)
         break
@@ -1075,6 +1096,126 @@ async function planClaudeCode(
     optional: false,
   })
   setOutcome(plan, "claude-code", "installed", "claude plugin marketplace add + plugin install telem")
+}
+
+/**
+ * What the Muse surface copies into `<muse config>/`, from where it ships: the Muse
+ * hook and skill from this package's `muse/`, and the two Codex hook modules the hook
+ * imports from the packaged Codex plugin. Copied because a user hook needs a path that
+ * outlives this run (an `npx` cache does not), and flat, so the imports resolve.
+ */
+function museFiles(ports: Ports, configDir: string): { path: string; contents: string | null }[] | null {
+  const museDir = (ports.museDir ?? "").trim()
+  const pluginDir = resolveCodexPluginDir(ports)
+  if (!museDir || !pluginDir) return null
+  const hookDir = join(configDir, "telem")
+  return [
+    { path: join(hookDir, MUSE_HOOK_FILE), contents: ports.readText(join(museDir, MUSE_HOOK_FILE)) },
+    ...["telem-reasoning.mjs", "telem-config.mjs"].map((name) => ({
+      path: join(hookDir, name),
+      contents: ports.readText(join(pluginDir, "hooks", name)),
+    })),
+    { path: join(configDir, "skills", "telem", "SKILL.md"), contents: ports.readText(join(museDir, "SKILL.md")) },
+  ]
+}
+
+/**
+ * The Muse CLI surface: one settings.json edit (the hosted server with the key, the
+ * telem hook, and — with consent — Muse's built-in web search off), plus the hook and
+ * skill files (`museFiles`).
+ */
+async function planMuse(
+  ports: Ports,
+  flags: Flags,
+  ui: Ui | null,
+  plan: Plan,
+  home: string,
+  apiKey: string | undefined,
+  autoRouting: HostedRouting | undefined,
+): Promise<void> {
+  const configDir = museConfigDir(ports.env, home)
+  const settingsPath = museSettingsPath(configDir)
+  const source = ports.readText(settingsPath)
+  // The Codex question, the same default: Yes. Skipped when it is already off.
+  const disableWebSearch = museWebSearchOff(source)
+    ? false
+    : ui
+      ? await ui.confirm({
+          message: `Send Muse's web searches through Telem? (sets tools.web_search.mode = "off" in ${abbreviateHome(settingsPath, home)})`,
+          initialValue: true,
+        })
+      : flags.museDisableWebSearch
+
+  const files = museFiles(ports, configDir)
+  const hookFound = files !== null && files.every((file) => file.contents !== null)
+
+  const edit = planMuseSettings(
+    source,
+    {
+      apiKey,
+      autoRouting,
+      disableWebSearch,
+      hookCommand: hookFound
+        ? `node "${join(configDir, "telem", MUSE_HOOK_FILE)}" "${museSessionsDir(ports.env, home)}"`
+        : null,
+    },
+    settingsPath,
+  )
+  if (edit.status === "unparseable") {
+    plan.notes.push(surfaceNote("muse", edit.reason))
+    setOutcome(plan, "muse", "failed", edit.reason)
+    return
+  }
+
+  const changes: string[] = []
+  if (edit.status === "write") {
+    addFile(plan, {
+      path: settingsPath,
+      contents: edit.contents,
+      secret: !edit.keyless && Boolean(apiKey),
+      created: edit.created,
+      reason: edit.changes.join("; "),
+      undo: museUndoLine(edit, settingsPath),
+    })
+    changes.push(`${settingsPath}: ${edit.changes.join(", ")}`)
+    if (edit.keyless) {
+      plan.notes.push(
+        surfaceNote(
+          "muse",
+          `mcpServers.telem points at the hosted ${MUSE_URL} but no API key was available to write. ` +
+            `Add "Authorization": "Bearer <your tlm_ key>" to its "headers" in ${settingsPath}.`,
+        ),
+      )
+    }
+  }
+  // Rewritten when they differ, so a re-run ships hook and skill updates.
+  let copied = false
+  for (const file of hookFound ? files : []) {
+    const existing = ports.readText(file.path)
+    if (existing === file.contents) continue
+    addFile(plan, {
+      path: file.path,
+      contents: file.contents as string,
+      secret: false,
+      created: existing === null,
+      reason: "the telem Muse hook and skill",
+      undo: undoLine(file.path, existing === null),
+    })
+    copied = true
+  }
+  if (copied) changes.push(`copy the telem hook and skill into ${configDir}`)
+
+  if (!hookFound) {
+    const reason = "the telem hook and skill were not found in this package, so searches are not recorded with lineage or reasoning"
+    plan.notes.push(surfaceNote("muse", `${reason}. Re-run with the published \`npx @telemai/create\`.`))
+    setOutcome(plan, "muse", "partial", changes.length ? `${changes.join("; ")}; ${reason}` : reason)
+    return
+  }
+  if (!changes.length) {
+    setOutcome(plan, "muse", "unchanged", `${settingsPath} already has the telem server and hook`)
+    return
+  }
+  setOutcome(plan, "muse", "installed", changes.join("; "))
 }
 
 function resolveCodexPluginDir(ports: Ports): string | null {
@@ -1941,7 +2082,7 @@ const NO_KEY_SAVED = {
 /**
  * Every file THIS run will write the API key into, given what the user selected.
  *
- * There are three in the whole installer, all 0600, and which of them a run touches
+ * There are four in the whole installer, all 0600, and which of them a run touches
  * is decided entirely by the surfaces picked — so the pre-paste note is built from
  * `selected` rather than asserting a fixed count. The old note promised the key went
  * "only to ~/.telem/credentials.json" at the exact moment the user decides whether to
@@ -1976,6 +2117,13 @@ export function keyTargetFiles(
   // install from — this note promised a file the run then never wrote, at the exact
   // moment the user is deciding whether to trust the installer with a secret. The
   // detection it depends on is a start-of-run snapshot, available right here.
+  // Muse, like Codex, is unconditional: its settings.json edit needs nothing detected.
+  if (selected.includes("muse")) {
+    files.push({
+      path: museSettingsPath(museConfigDir(ports.env, home)),
+      why: "the Authorization header of mcpServers.telem — the hosted Telem MCP authenticates every request",
+    })
+  }
   if (selected.includes("claude-code") && claudePluginConfigApplies(ports, tools)) {
     files.push({
       path: claudePluginConfigPath(claudeConfigDir(ports.env, home)),
