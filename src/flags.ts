@@ -26,6 +26,10 @@ export type Flags = {
   codexDisableWebSearch: boolean
   /** Non-interactive consent to add "WebSearch" to Claude Code's permissions.deny. */
   claudeDisableWebSearch: boolean
+  /** Non-interactive consent to set disable_web_search = true in Grok Build's config. */
+  grokDisableWebSearch: boolean
+  /** Non-interactive consent to let Grok Build run the two Telem tools without asking. */
+  grokAllowTelem: boolean
   /** Codex reasoning capture is ADDITIVE and ON by default; --no-codex-reasoning opts out. */
   codexReasoning: boolean
   /** Non-interactive consent to migrate an existing stdio Codex telem table to the hosted remote. */
@@ -51,6 +55,8 @@ const EMPTY: Flags = {
   project: false,
   codexDisableWebSearch: false,
   claudeDisableWebSearch: false,
+  grokDisableWebSearch: false,
+  grokAllowTelem: false,
   // ON by default: reasoning capture only adds capture, it disables nothing.
   codexReasoning: true,
   codexMigrateHooks: false,
@@ -151,6 +157,12 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
       case "--claude-disable-web-search":
         flags.claudeDisableWebSearch = true
         break
+      case "--grok-disable-web-search":
+        flags.grokDisableWebSearch = true
+        break
+      case "--grok-allow-telem":
+        flags.grokAllowTelem = true
+        break
       case "--no-codex-reasoning":
         flags.codexReasoning = false
         break
@@ -214,6 +226,8 @@ export function ignoredInteractiveFlags(flags: Flags): string[] {
   if (flags.project) ignored.push("--project (the wizard asks about the project config)")
   if (flags.codexDisableWebSearch) ignored.push("--codex-disable-web-search (the wizard asks)")
   if (flags.claudeDisableWebSearch) ignored.push("--claude-disable-web-search (the wizard asks)")
+  if (flags.grokDisableWebSearch) ignored.push("--grok-disable-web-search (the wizard asks)")
+  if (flags.grokAllowTelem) ignored.push("--grok-allow-telem (the wizard asks)")
   if (flags.codexMigrateHooks) ignored.push("--codex-migrate-hooks (the wizard asks)")
   if (flags.installUv) ignored.push("--install-uv (the wizard asks)")
   if (flags.writeUnverified) ignored.push("--write-unverified (the wizard asks)")
@@ -255,6 +269,11 @@ Flags (they double as the non-interactive API):
   --codex-disable-web-search    also set web_search = "disabled" in Codex's config
   --claude-disable-web-search   also add "WebSearch" to permissions.deny in Claude
                                 Code's settings.json
+  --grok-disable-web-search     also set disable_web_search = true in Grok Build's
+                                config.toml (its own web search and fetch; X
+                                search stays)
+  --grok-allow-telem            also let Grok Build run telem_search and telem_fetch
+                                without asking each time (a [permission] allow rule)
   --no-codex-reasoning          skip the Codex telem plugin (reasoning hook AND
                                 telem skill) and model_reasoning_summary; capture
                                 is on by default
@@ -287,11 +306,12 @@ pass --dry-run, and the machine is untouched. The commit is not atomic across
 files, though — if it fails part way it names the files that already landed.
 
 The API key never goes on a command line and is never printed. It is written to
-exactly three files, all 0600 — which of them depends on what you install:
+at most four files, all 0600 — which of them depends on what you install:
   ~/.telem/credentials.json   always; every surface falls back to it
   ~/.codex/config.toml        with --client codex: the Authorization header of
                               [mcp_servers.telem], which the hosted Telem MCP
                               authenticates per request
+  ~/.grok/config.toml         with --client grok: the same header, for Grok Build
   ~/.claude/settings.json     with --client claude-code:
                               pluginConfigs["telem@telem"].options.TELEM_API_KEY,
                               which the plugin's inline MCP server reads`

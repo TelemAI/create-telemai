@@ -103,6 +103,8 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     claudePluginDir: resolveClaudePluginDir(),
     codexPluginDir: resolveCodexPluginDir(),
     pluginContentHash: codexPluginContentHash,
+    // The package root (see resolvePluginDir): src/ and dist/ both sit one level down.
+    grokDir: join(dirname(dirname(fileURLToPath(import.meta.url))), "grok"),
   })
 }
 

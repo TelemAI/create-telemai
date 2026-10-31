@@ -57,12 +57,14 @@ OpenCode itself is a Bun binary.
 | `~/.config/opencode/opencode.json(c)` | `@telemai/opencode-plugin` added to the `plugin` array | unchanged |
 | `~/.codex/config.toml` | `[mcp_servers.telem]` pointing at the hosted MCP, with your key in its `http_headers` Authorization line; `model_reasoning_summary = "detailed"` so Codex emits the summaries the hook captures; a `[hooks.state."…"]` entry pre-trusting the plugin's hook; plus `web_search` only if you consent | `0600` when it carries the key, otherwise unchanged |
 | `~/.claude/settings.json` | `pluginConfigs["telem@telem"].options.TELEM_API_KEY` — the key the Claude Code plugin's inline MCP server reads; plus `"WebSearch"` in `permissions.deny` only if you consent | `0600` |
+| `~/.grok/config.toml` (or `$GROK_HOME/config.toml`) | `[mcp_servers.telem]` pointing at the hosted MCP, with your key in its `headers` Authorization line; plus `disable_web_search = true` and a `[permission]` allow rule for the two Telem tools, each only if you consent | `0600` when it carries the key |
+| `~/.grok/hooks/telem.json`, `~/.grok/telem/`, `~/.grok/skills/telem/` | the Grok Build PreToolUse hook (its own file), the hook script with the two modules it imports, and the telem skill | `0644` |
 
 **The API key never appears on a command line and is never printed.** The
 installer refuses to run a command, print an instruction, or emit a summary
 containing it.
 
-It is written to exactly **three** files, all `0600` — which of them a given run
+It is written to at most **four** files, all `0600` — which of them a given run
 touches depends on the surfaces you install:
 
 - `~/.telem/credentials.json` — always: the credential home every surface falls
@@ -73,6 +75,8 @@ touches depends on the surfaces you install:
   the key has to travel in the table. Re-runs reconcile that header with your
   current key, so rotating the key (or adding one after a keyless install) fixes
   Codex on the next run.
+- `~/.grok/config.toml` — *only* if you install Grok Build: the same header, in
+  `[mcp_servers.telem]`'s `headers`, for the same reason.
 - `~/.claude/settings.json` — *only* if you install the Claude Code plugin, as
   `pluginConfigs["telem@telem"].options.TELEM_API_KEY`. The plugin declares a
   required `userConfig.TELEM_API_KEY` that its inline `mcpServers.telem` reads;
@@ -89,6 +93,7 @@ prints just before it asks for the key.
 | `opencode` | adds `@telemai/opencode-plugin` to the `plugin` array of `opencode.json`/`opencode.jsonc` |
 | `claude-code` | `claude plugin marketplace add` + `claude plugin install telem@telem` (hosted MCP + lineage hooks; key staged into plugin config). `"WebSearch"` in `permissions.deny` only with your consent, so Claude Code's own web search is off and its searches go through Telem. |
 | `codex` | points `[mcp_servers.telem]` in `~/.codex/config.toml` at the hosted MCP (url + auth header), then `codex plugin marketplace add TelemAI/codex-plugin` + `codex plugin add telem@telem` for the reasoning hook and the telem skill. Codex skips an untrusted plugin hook *silently* and has no CLI to trust one, so the installer also pre-grants that hook's trust in `config.toml`. An existing stdio table is left exactly as it is — the local server it starts is deprecated, and nothing rewrites a table this installer did not write; an *older hand-written* reasoning hook under `~/.codex/hooks/` is replaced only with your consent (`--codex-migrate-hooks`) — without it the plugin is not installed, because both hooks would fire on every search — and if this run *cannot* install the plugin (no `codex` on PATH, no plugin source), the old hook is left exactly as it is and the surface is reported `manual` rather than installed. `web_search = "disabled"` only with your consent. Needs no local `telem-mcp`. |
+| `grok` | points `[mcp_servers.telem]` in `~/.grok/config.toml` at the hosted MCP (url + auth header), writes the PreToolUse hook into its own `~/.grok/hooks/telem.json`, and copies the hook and the telem skill into `~/.grok/`. The hook sends lineage, the reasoning before each call, and your `.telem` options. Grok Build runs a user hook only in a folder you trust, and while one is installed it asks you to trust each new folder. `disable_web_search = true` only with your consent (Grok's own web search and fetch; X search stays), and a `[permission]` allow rule for `telem_search` and `telem_fetch` only with your consent; a `[permission]` table you already have is never edited. Needs `node` for the hook. |
 | `pi` | `pi install npm:@telemai/pi-telem` |
 | `openclaw` | `openclaw plugins install npm:@telemai/openclaw-plugin --force` + `openclaw config set tools.alsoAllow` (merged with whatever it already allows, because `config set` replaces the array). The wizard owns the version gate: openclaw below `2026.7.1` cannot load the plugin and is refused rather than "installed" into. It does **not** delegate to `telem-openclaw-setup` — that is a source-checkout dev tool (`npm ci` + `--link`), and the published tarball has no lockfile for `npm ci`. |
 | `hermes` | `hermes plugins install TelemAI/hermes-plugin --yes-deps --enable`: Hermes clones the plugin and installs `telem-sdk` into its own managed environment. On a re-run, when `~/.hermes/plugins/telem` (or `$HERMES_HOME/plugins/telem`) already exists, only `hermes plugins enable telem`. The key comes from `~/.telem/credentials.json`, like every surface. |

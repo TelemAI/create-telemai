@@ -11,12 +11,13 @@
 //  * THE KEY NEVER GOES ON A COMMAND LINE AND IS NEVER PRINTED. No argv, no note,
 //    no warning, no summary field ever carries it; `assertNoSecretInCommands` and
 //    `assertNoSecretInText` turn that from a convention into a check.
-//    It reaches exactly three FILES, all written 0600, and which of them depends on
+//    It reaches at most four FILES, all written 0600, and which of them depends on
 //    the surfaces selected (`keyTargetFiles` is the one list):
 //      ~/.telem/credentials.json — every surface falls back to it;
 //      ~/.codex/config.toml — the `http_headers` Authorization line of
 //        [mcp_servers.telem], because the hosted remote authenticates per request
 //        and has no credentials.json to read;
+//      ~/.grok/config.toml — the same line for Grok Build, spelled `headers`;
 //      ~/.claude/settings.json — pluginConfigs["telem@telem"].options.TELEM_API_KEY,
 //        which the Claude Code plugin's inline MCP server reads.
 
@@ -48,6 +49,21 @@ import {
   hostedRouting,
   planCodexConfig,
 } from "./codex.ts"
+import {
+  GROK_HOOK_FILE,
+  GROK_TABLE,
+  GROK_URL,
+  grokConfigPath,
+  grokHome,
+  grokHookDir,
+  grokHooksPath,
+  grokSkillPath,
+  grokTelemAllowed,
+  grokUndoLine,
+  grokWebSearchOff,
+  planGrokConfig,
+  planGrokHooksFile,
+} from "./grok.ts"
 import {
   CODEX_HOOKS_DIRNAME,
   CODEX_HOOKS_JSON,
@@ -165,6 +181,11 @@ export type Ports = {
    * `trusted_content_hash` and Codex pins the hook to the first content it sees.
    */
   pluginContentHash?: (dir: string) => string | null
+  /**
+   * Absolute path to this package's `grok/` directory (the Grok Build hook and skill),
+   * filled in by index.ts. Without it the Grok Build surface installs the server alone.
+   */
+  grokDir?: string
 }
 
 export type Summary = {
@@ -797,6 +818,9 @@ async function planSurfaces(
       case "codex":
         await planCodex(ports, flags, ui, plan, home, tools, context.apiKey, context.autoRouting)
         break
+      case "grok":
+        await planGrok(ports, flags, ui, plan, home, context.apiKey, context.autoRouting)
+        break
       case "pi":
         planPi(plan, tools)
         break
@@ -1286,6 +1310,178 @@ function codexChangeUndo(change: string): string | null {
   return null
 }
 
+/**
+ * What the Grok Build surface copies into `<grok home>/`, from where it ships: the hook
+ * and skill from this package's `grok/`, and the two Codex hook modules the hook imports
+ * from the packaged Codex plugin. Copied because a user hook needs a path that outlives
+ * this run (an `npx` cache does not), and flat, so the imports resolve.
+ */
+function grokFiles(ports: Ports, grokDir: string): { path: string; contents: string | null }[] | null {
+  const shipped = (ports.grokDir ?? "").trim()
+  const pluginDir = resolveCodexPluginDir(ports)
+  if (!shipped || !pluginDir) return null
+  const hookDir = grokHookDir(grokDir)
+  return [
+    { path: join(hookDir, GROK_HOOK_FILE), contents: ports.readText(join(shipped, GROK_HOOK_FILE)) },
+    ...["telem-reasoning.mjs", "telem-config.mjs"].map((name) => ({
+      path: join(hookDir, name),
+      contents: ports.readText(join(pluginDir, "hooks", name)),
+    })),
+    { path: grokSkillPath(grokDir), contents: ports.readText(join(shipped, "SKILL.md")) },
+  ]
+}
+
+/**
+ * The Grok Build surface: one config.toml edit (the hosted server with the key, and —
+ * each with consent — Grok's own web search off and an allow rule for the two Telem
+ * tools), our own hooks file, and the hook and skill files (`grokFiles`).
+ */
+async function planGrok(
+  ports: Ports,
+  flags: Flags,
+  ui: Ui | null,
+  plan: Plan,
+  home: string,
+  apiKey: string | undefined,
+  autoRouting: HostedRouting | undefined,
+): Promise<void> {
+  const grokDir = grokHome(ports.env, home)
+  const configPath = grokConfigPath(grokDir)
+  const source = ports.readText(configPath)
+  const shown = abbreviateHome(configPath, home)
+  // The Codex question, the same default: Yes. Skipped when it is already off.
+  const disableWebSearch = grokWebSearchOff(source)
+    ? false
+    : ui
+      ? await ui.confirm({
+          message: `Send Grok Build's web searches through Telem? (sets disable_web_search = true in ${shown})`,
+          initialValue: true,
+        })
+      : flags.grokDisableWebSearch
+  // Grok asks before every MCP call. Codex and Claude Code run the Telem tools without
+  // asking, so the default is Yes; skipped when the file already allows both.
+  const allowTelem = grokTelemAllowed(source)
+    ? false
+    : ui
+      ? await ui.confirm({
+          message: `Let Grok Build run Telem searches and page reads without asking each time? (adds a [permission] allow rule to ${shown})`,
+          initialValue: true,
+        })
+      : flags.grokAllowTelem
+
+  const edit = planGrokConfig(
+    source,
+    { apiKey: apiKey ?? null, autoRouting: autoRouting ?? null, disableWebSearch, allowTelem },
+    configPath,
+  )
+  if (edit.status === "abort") {
+    plan.notes.push(surfaceNote("grok", edit.reason))
+    setOutcome(plan, "grok", "failed", edit.reason)
+    return
+  }
+
+  const changes: string[] = []
+  if (edit.status === "write") {
+    addFile(plan, {
+      path: configPath,
+      contents: edit.contents,
+      // A 0600 secret write whenever the file holds a key, whoever wrote it there.
+      secret: /Authorization\s*=\s*"Bearer\s+\S/i.test(edit.contents),
+      created: edit.created,
+      reason: edit.changes.join("; "),
+      undo: grokUndoLine(edit, configPath),
+    })
+    changes.push(`${configPath}: ${edit.changes.join(", ")}`)
+    if (edit.keyless) {
+      plan.notes.push(
+        surfaceNote(
+          "grok",
+          edit.keyMalformed
+            ? `[${GROK_TABLE}] points at the hosted ${GROK_URL}, but the available API key did not look like a valid tlm_ key, ` +
+                "so no auth header was written. " +
+                `Add \`headers = { Authorization = "Bearer <your tlm_ key>" }\` to that table in ${configPath} by hand.`
+            : `[${GROK_TABLE}] points at the hosted ${GROK_URL} but no API key was available to write. ` +
+                `Add \`headers = { Authorization = "Bearer <your tlm_ key>" }\` to that table in ${configPath}.`,
+        ),
+      )
+    }
+  }
+  if (edit.permissionManual) {
+    plan.notes.push(
+      surfaceNote(
+        "grok",
+        `Grok Build asks before each Telem call. ${configPath} already has a [permission] table, which this installer ` +
+          `does not edit; to let Grok run the Telem tools without asking, add ${edit.permissionManual}.`,
+      ),
+    )
+  }
+
+  const files = grokFiles(ports, grokDir)
+  const hookFound = files !== null && files.every((file) => file.contents !== null)
+  let hookReason: string | null = hookFound
+    ? null
+    : "the telem hook and skill were not found in this package, so searches are not recorded with lineage or reasoning"
+  if (hookFound) {
+    const hooksPath = grokHooksPath(grokDir)
+    const hooksEdit = planGrokHooksFile(ports.readText(hooksPath), join(grokHookDir(grokDir), GROK_HOOK_FILE), hooksPath)
+    if (hooksEdit.status === "refuse") {
+      hookReason = hooksEdit.reason
+    } else {
+      if (hooksEdit.status === "write") {
+        addFile(plan, {
+          path: hooksPath,
+          contents: hooksEdit.contents,
+          secret: false,
+          created: hooksEdit.created,
+          reason: "the telem PreToolUse hook",
+          undo: undoLine(hooksPath, hooksEdit.created),
+        })
+        changes.push(`${hooksEdit.created ? "add" : "update"} ${hooksPath}`)
+        if (hooksEdit.created) {
+          plan.notes.push(
+            surfaceNote(
+              "grok",
+              "Grok Build runs a user hook only in a folder you trust, and while one is installed it asks you to trust " +
+                "each new folder. In a folder you do not trust, Telem searches still work, but without lineage, " +
+                "reasoning or your .telem options.",
+            ),
+          )
+        }
+      }
+      // Rewritten when they differ, so a re-run ships hook and skill updates.
+      let copied = false
+      for (const file of files) {
+        const existing = ports.readText(file.path)
+        if (existing === file.contents) continue
+        addFile(plan, {
+          path: file.path,
+          contents: file.contents as string,
+          secret: false,
+          created: existing === null,
+          reason: "the telem Grok Build hook and skill",
+          undo: undoLine(file.path, existing === null),
+        })
+        copied = true
+      }
+      if (copied) changes.push(`copy the telem hook and skill into ${grokDir}`)
+    }
+  }
+
+  if (hookReason) {
+    const next = hookReason.endsWith("re-run the installer")
+      ? `${hookReason}.`
+      : `${hookReason}. Re-run with the published \`npx @telemai/create\`.`
+    plan.notes.push(surfaceNote("grok", next))
+    setOutcome(plan, "grok", "partial", changes.length ? `${changes.join("; ")}; ${hookReason}` : hookReason)
+    return
+  }
+  if (!changes.length) {
+    setOutcome(plan, "grok", "unchanged", `${configPath} already has the telem server and hook`)
+    return
+  }
+  setOutcome(plan, "grok", "installed", changes.join("; "))
+}
+
 type CodexPluginPlan =
   | { status: "skipped" }
   | { status: "abort"; reason: string }
@@ -1766,6 +1962,13 @@ export function keyTargetFiles(
     files.push({
       path: join(codexHomeDir(ports.env, home), "config.toml"),
       why: `the Authorization header of [${CODEX_TABLE}] — the hosted Telem MCP authenticates every request`,
+    })
+  }
+  // Grok Build's is unconditional too: the table is written whether or not `grok` is on PATH.
+  if (selected.includes("grok")) {
+    files.push({
+      path: grokConfigPath(grokHome(ports.env, home)),
+      why: `the Authorization header of [${GROK_TABLE}] in Grok Build's config — the hosted Telem MCP authenticates every request`,
     })
   }
   // Claude's is NOT. `planClaudeCode` stages settings.json only after both of its

@@ -19,6 +19,7 @@ export type SurfaceId =
   | "opencode"
   | "claude-code"
   | "codex"
+  | "grok"
   | "pi"
   | "openclaw"
   | "hermes"
@@ -84,6 +85,15 @@ export const SURFACES: readonly Surface[] = [
     hint: "Adds Telem search to Codex, and records its reasoning",
     // The hosted remote: a url + an auth header in config.toml. No local telem-mcp
     // process is ever spawned, so this surface needs no Python at all.
+    needsPython: false,
+  },
+  {
+    id: "grok",
+    label: "Grok Build",
+    group: "Agent hosts",
+    probe: "grok",
+    hint: "Adds Telem search to Grok Build, and records its reasoning",
+    // The hosted remote in ~/.grok/config.toml, like Codex; the hook runs on node.
     needsPython: false,
   },
   {

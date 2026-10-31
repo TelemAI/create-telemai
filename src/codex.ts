@@ -113,7 +113,7 @@ export type CodexEdit =
  * aliases a stranger's server into our own region, and a consented stdio migration
  * DELETES that region. Parts never alias: a quoted segment is one part, always.
  */
-const CODEX_TABLE_PARTS = ["mcp_servers", "telem"] as const
+export const CODEX_TABLE_PARTS = ["mcp_servers", "telem"] as const
 export const CODEX_TABLE = CODEX_TABLE_PARTS.join(".")
 export const CODEX_WEB_SEARCH_KEY = "web_search"
 /** The hosted Telem MCP endpoint Codex's remote server points at. */
@@ -165,7 +165,7 @@ export type CodexTelemForm = "absent" | "stdio" | "remote" | "unparseable"
  * the same string for two entirely different tables. Compare parts (isKeyPath /
  * isUnderKeyPath); never compare, prefix-match or print the joined form.
  */
-type TomlLine =
+export type TomlLine =
   | { kind: "blank" | "comment" | "continuation"; text: string }
   | { kind: "header"; text: string; name: string; parts: string[] }
   | { kind: "pair"; text: string; key: string; parts: string[] }
@@ -208,7 +208,7 @@ function splitDotted(raw: string): string[] {
  * Do these key parts name EXACTLY this path? The comparison every table-identity
  * test in this file runs on, instead of `joined === "a.b"`.
  */
-function isKeyPath(parts: readonly string[], wanted: readonly string[]): boolean {
+export function isKeyPath(parts: readonly string[], wanted: readonly string[]): boolean {
   return parts.length === wanted.length && wanted.every((part, index) => parts[index] === part)
 }
 
@@ -217,7 +217,7 @@ function isKeyPath(parts: readonly string[], wanted: readonly string[]): boolean
  * real path PREFIX of them? Replaces `joined.startsWith("a.b.")`, which cannot tell
  * a sub-table apart from a sibling whose quoted name happens to contain a dot.
  */
-function isUnderKeyPath(parts: readonly string[], wanted: readonly string[]): boolean {
+export function isUnderKeyPath(parts: readonly string[], wanted: readonly string[]): boolean {
   return parts.length > wanted.length && wanted.every((part, index) => parts[index] === part)
 }
 
@@ -341,7 +341,7 @@ function indexOfAssignment(line: string): number {
 }
 
 /** Replace a pair line's value, keeping its key spacing and any trailing comment. */
-function replaceValue(line: string, value: string): string {
+export function replaceValue(line: string, value: string): string {
   const equals = indexOfAssignment(line)
   if (equals === -1) return line
   const after = line.slice(equals + 1)
@@ -366,7 +366,7 @@ function commentIndex(text: string): number {
   return -1
 }
 
-function currentValue(line: string): string {
+export function currentValue(line: string): string {
   const equals = indexOfAssignment(line)
   if (equals === -1) return ""
   const after = line.slice(equals + 1)
@@ -375,34 +375,48 @@ function currentValue(line: string): string {
 }
 
 /**
+ * The key a server table's inline headers live under. Codex spells it `http_headers`;
+ * Grok Build, which reuses this editor for its own `config.toml`, spells it `headers`.
+ */
+export type HeadersKey = "http_headers" | "headers"
+
+/**
  * The lines that ARE the hosted remote server, in write order. The `url` is always
  * present; the inline `http_headers` line is written ONLY when a key is available,
  * carrying it as a REAL Bearer value (the hosted server authenticates per request).
  * With no key we write the url alone — never an empty/placeholder Bearer — and the
  * run prints a note to add the header by hand.
  */
-function remoteTableBody(apiKey: string | null, routing: HostedRouting | null): TomlLine[] {
+export function remoteTableBody(
+  apiKey: string | null,
+  routing: HostedRouting | null,
+  headersKey: HeadersKey = "http_headers",
+): TomlLine[] {
   const body: TomlLine[] = [{ kind: "pair", text: `url = "${CODEX_URL}"`, key: "url", parts: ["url"] }]
-  if (apiKey) body.push(authHeaderLine(apiKey, routing))
+  if (apiKey) body.push(authHeaderLine(apiKey, routing, headersKey))
   return body
 }
 
 /** The one inline `http_headers` line, so a fresh write and a reconcile agree. The
  * routing header rides only beside a key: a keyless table 401s anyway, and the
  * run tells the user to add the header by hand. */
-function authHeaderLine(apiKey: string, routing: HostedRouting | null): TomlLine {
+function authHeaderLine(apiKey: string, routing: HostedRouting | null, headersKey: HeadersKey): TomlLine {
   const routingPair = routing ? `, ${ROUTING_HEADER} = "${routing}"` : ""
   return {
     kind: "pair",
-    text: `http_headers = { Authorization = "Bearer ${apiKey}"${routingPair} }`,
-    key: "http_headers",
-    parts: ["http_headers"],
+    text: `${headersKey} = { Authorization = "Bearer ${apiKey}"${routingPair} }`,
+    key: headersKey,
+    parts: [headersKey],
   }
 }
 
 /** The bare text of the remote table, header included — used for a fresh write. */
-function remoteTableText(apiKey: string | null, routing: HostedRouting | null): string {
-  return `[${CODEX_TABLE}]\n${remoteTableBody(apiKey, routing)
+export function remoteTableText(
+  apiKey: string | null,
+  routing: HostedRouting | null,
+  headersKey: HeadersKey = "http_headers",
+): string {
+  return `[${CODEX_TABLE}]\n${remoteTableBody(apiKey, routing, headersKey)
     .map((line) => line.text)
     .join("\n")}\n`
 }
@@ -429,7 +443,7 @@ function tableSpanEnd(lines: TomlLine[], headerIdx: number): number {
  * `[mcp_servers.telem.env]` left standing keeps a copy of the old key the user
  * believes the migration took away.
  */
-type TelemTable = {
+export type TelemTable = {
   headerIdx: number
   /** End of the parent table's own lines — the next header of any name, or EOF. */
   ownEnd: number
@@ -441,7 +455,7 @@ type TelemTable = {
   subTables: string[][]
 }
 
-function findTelemTable(lines: TomlLine[]): TelemTable | null {
+export function findTelemTable(lines: TomlLine[]): TelemTable | null {
   // Identity by parts: `["mcp_servers.telem"]` is a top-level table literally named
   // `mcp_servers.telem`, NOT our nested one, and joined names cannot tell them apart.
   const headerIdx = lines.findIndex((line) => line.kind === "header" && isKeyPath(line.parts, CODEX_TABLE_PARTS))
@@ -465,7 +479,7 @@ function findTelemTable(lines: TomlLine[]): TelemTable | null {
 }
 
 /** The text of a single-line TOML string value, unquoted; null if it is not one. */
-function stringValue(raw: string): string | null {
+export function stringValue(raw: string): string | null {
   const trimmed = raw.trim()
   for (const quote of ['"', "'"]) {
     if (trimmed.length >= 2 && trimmed.startsWith(quote) && trimmed.endsWith(quote) && !trimmed.startsWith(quote.repeat(3))) {
@@ -501,11 +515,12 @@ const HOSTED_AUTH_BEARER = /((?:"Authorization"|'Authorization'|Authorization)\s
  *
  * Mutates `lines`; returns what it did, or null for "nothing to do".
  */
-function reconcileHostedAuth(
+export function reconcileHostedAuth(
   lines: TomlLine[],
   telem: TelemTable,
   apiKey: string | null,
   routing: HostedRouting | null,
+  headersKey: HeadersKey = "http_headers",
 ): "added" | "replaced" | null {
   if (!apiKey) return null
   const urlIndex = lines.findIndex(
@@ -518,15 +533,15 @@ function reconcileHostedAuth(
   // `[mcp_servers.telem.http_headers]` and `http_headers.X = …` both define the
   // name as a table; adding a second inline `http_headers` beside either would
   // define it twice and break the file. Abstain, exactly like the web_search flip.
-  if (telem.subTables.some((parts) => isKeyPath(parts, [...CODEX_TABLE_PARTS, "http_headers"]))) return null
-  if (telem.pairs.some((pair) => isUnderKeyPath(pair.parts, ["http_headers"]))) return null
+  if (telem.subTables.some((parts) => isKeyPath(parts, [...CODEX_TABLE_PARTS, headersKey]))) return null
+  if (telem.pairs.some((pair) => isUnderKeyPath(pair.parts, [headersKey]))) return null
 
   const headerIndex = lines.findIndex(
     (line, index) =>
-      index > telem.headerIdx && index < telem.ownEnd && line.kind === "pair" && isKeyPath(line.parts, ["http_headers"]),
+      index > telem.headerIdx && index < telem.ownEnd && line.kind === "pair" && isKeyPath(line.parts, [headersKey]),
   )
   if (headerIndex === -1) {
-    lines.splice(urlIndex + 1, 0, authHeaderLine(apiKey, routing))
+    lines.splice(urlIndex + 1, 0, authHeaderLine(apiKey, routing, headersKey))
     return "added"
   }
   // A multi-line value continues onto the following lines; a one-line rewrite would
@@ -538,8 +553,8 @@ function reconcileHostedAuth(
   if (match[2] === apiKey) return null
   lines[headerIndex] = {
     kind: "pair",
-    key: "http_headers",
-    parts: ["http_headers"],
+    key: headersKey,
+    parts: [headersKey],
     // A function replacer, not a `$1…` string: the key is charset-validated, but a
     // replacement string is one `$&` away from meaning something else entirely.
     text: text.replace(HOSTED_AUTH_BEARER, (_all, head: string, _old: string, tail: string) => `${head}Bearer ${apiKey}${tail}`),
@@ -557,19 +572,20 @@ const ROUTING_PAIR = /((?:"X-Telem-Auto-Routing"|'X-Telem-Auto-Routing'|X-Telem-
  * custom url, a sub-table or dotted `http_headers`, a multi-line value, or a line
  * whose inline table cannot be found is left untouched.
  */
-function reconcileHostedRouting(
+export function reconcileHostedRouting(
   lines: TomlLine[],
   telem: TelemTable,
   routing: HostedRouting | null,
+  headersKey: HeadersKey = "http_headers",
 ): "added" | "replaced" | null {
   if (!routing) return null
   const inTable = (index: number) => index > telem.headerIdx && index < telem.ownEnd
   const urlIndex = lines.findIndex((line, index) => inTable(index) && line.kind === "pair" && isKeyPath(line.parts, ["url"]))
   if (urlIndex === -1 || stringValue(currentValue(lines[urlIndex].text)) !== CODEX_URL) return null
-  if (telem.subTables.some((parts) => isKeyPath(parts, [...CODEX_TABLE_PARTS, "http_headers"]))) return null
-  if (telem.pairs.some((pair) => isUnderKeyPath(pair.parts, ["http_headers"]))) return null
+  if (telem.subTables.some((parts) => isKeyPath(parts, [...CODEX_TABLE_PARTS, headersKey]))) return null
+  if (telem.pairs.some((pair) => isUnderKeyPath(pair.parts, [headersKey]))) return null
   const headerIndex = lines.findIndex(
-    (line, index) => inTable(index) && line.kind === "pair" && isKeyPath(line.parts, ["http_headers"]),
+    (line, index) => inTable(index) && line.kind === "pair" && isKeyPath(line.parts, [headersKey]),
   )
   if (headerIndex === -1 || lines[headerIndex + 1]?.kind === "continuation") return null
 
@@ -598,8 +614,8 @@ function reconcileHostedRouting(
   }
   lines[headerIndex] = {
     kind: "pair",
-    key: "http_headers",
-    parts: ["http_headers"],
+    key: headersKey,
+    parts: [headersKey],
     text: `${text.slice(0, equals + 1)}${next}${tail}`,
   }
   return outcome
