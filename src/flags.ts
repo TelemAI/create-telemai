@@ -7,7 +7,7 @@
 
 import { OFF_VALUE, SUGGESTIONS } from "./interview.ts"
 import type { SurfaceId } from "./surfaces.ts"
-import { SURFACE_IDS } from "./surfaces.ts"
+import { SURFACE_ALIASES, SURFACE_IDS } from "./surfaces.ts"
 
 /** What `--auto-routing` accepts: the modes the wizard offers, plus "off". */
 export const AUTO_ROUTING_CHOICES: readonly string[] = [...(SUGGESTIONS.autoRouting ?? []), OFF_VALUE]
@@ -102,8 +102,9 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
         // `--client opencode,codex` both work, because both spellings show up in
         // hand-written CI files and rejecting one is a pointless papercut.
         for (const raw of value.split(",")) {
-          const id = raw.trim()
-          if (!id) continue
+          const given = raw.trim()
+          if (!given) continue
+          const id = Object.hasOwn(SURFACE_ALIASES, given) ? SURFACE_ALIASES[given] : given
           if (!(SURFACE_IDS as readonly string[]).includes(id)) {
             errors.push(`unknown --client ${id}; valid: ${SURFACE_IDS.join(", ")}`)
             continue
@@ -329,8 +330,8 @@ at most eight files, all 0600 — which of them depends on what you install:
   ~/.config/muse/settings.json  with --client muse: the Authorization header of
                               mcpServers.telem, which the hosted Telem MCP
                               authenticates per request
-  ~/.copilot/mcp-config.json  with --client copilot: the same header, for GitHub
-                              Copilot (VS Code's agent and Copilot CLI)
+  ~/.copilot/mcp-config.json  with --client vscode: the same header, for VS Code's
+                              agent and Copilot CLI
   ~/.cursor/mcp.json          with --client cursor: the same header, for Cursor
   ~/.config/devin/mcp_config.json  with --client devin: the same header, for
                               Devin Desktop (formerly Windsurf) and the Devin CLI`

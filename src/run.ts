@@ -887,7 +887,7 @@ async function planSurfaces(
       case "muse":
         await planMuse(ports, flags, ui, plan, home, context.apiKey, context.autoRouting)
         break
-      case "copilot":
+      case "vscode":
         planCopilot(ports, plan, home, context.apiKey, context.autoRouting)
         break
       case "cursor":
@@ -1459,8 +1459,8 @@ function planCopilot(
   const mcpPath = copilotMcpConfigPath(copilotDir)
   const mcpEdit = planCopilotMcpConfig(ports.readText(mcpPath), { apiKey, autoRouting }, mcpPath)
   if (mcpEdit.status === "unparseable") {
-    plan.notes.push(surfaceNote("copilot", mcpEdit.reason))
-    setOutcome(plan, "copilot", "failed", mcpEdit.reason)
+    plan.notes.push(surfaceNote("vscode", mcpEdit.reason))
+    setOutcome(plan, "vscode", "failed", mcpEdit.reason)
     return
   }
   const settingsPath = copilotSettingsPath(copilotDir)
@@ -1468,8 +1468,8 @@ function planCopilot(
     ? planCopilotSettings(ports.readText(settingsPath), pluginDir, settingsPath)
     : ({ status: "unchanged" } as const)
   if (settingsEdit.status === "unparseable") {
-    plan.notes.push(surfaceNote("copilot", settingsEdit.reason))
-    setOutcome(plan, "copilot", "failed", settingsEdit.reason)
+    plan.notes.push(surfaceNote("vscode", settingsEdit.reason))
+    setOutcome(plan, "vscode", "failed", settingsEdit.reason)
     return
   }
 
@@ -1487,7 +1487,7 @@ function planCopilot(
     if (mcpEdit.keyless) {
       plan.notes.push(
         surfaceNote(
-          "copilot",
+          "vscode",
           `mcpServers.telem points at the hosted ${COPILOT_URL} but no API key was available to write. ` +
             `Add "Authorization": "Bearer <your tlm_ key>" to its "headers" in ${mcpPath}.`,
         ),
@@ -1525,15 +1525,15 @@ function planCopilot(
 
   if (!pluginFound) {
     const reason = "the telem plugin was not found in this package, so searches carry no lineage and Copilot gets no skill"
-    plan.notes.push(surfaceNote("copilot", `${reason}. Re-run with the published \`npx @telemai/create\`.`))
-    setOutcome(plan, "copilot", "partial", changes.length ? `${changes.join("; ")}; ${reason}` : reason)
+    plan.notes.push(surfaceNote("vscode", `${reason}. Re-run with the published \`npx @telemai/create\`.`))
+    setOutcome(plan, "vscode", "partial", changes.length ? `${changes.join("; ")}; ${reason}` : reason)
     return
   }
   if (!changes.length) {
-    setOutcome(plan, "copilot", "unchanged", `${copilotDir} already has the telem server and plugin`)
+    setOutcome(plan, "vscode", "unchanged", `${copilotDir} already has the telem server and plugin`)
     return
   }
-  setOutcome(plan, "copilot", "installed", changes.join("; "))
+  setOutcome(plan, "vscode", "installed", changes.join("; "))
 }
 
 function resolveCodexPluginDir(ports: Ports): string | null {
@@ -2443,7 +2443,7 @@ export function keyTargetFiles(
     })
   }
   // Copilot's is unconditional too: mcp-config.json is written whether or not the plugin is found.
-  if (selected.includes("copilot")) {
+  if (selected.includes("vscode")) {
     files.push({
       path: copilotMcpConfigPath(copilotHome(ports.env, home)),
       why: "the Authorization header of mcpServers.telem in GitHub Copilot's mcp-config.json — the hosted Telem MCP authenticates every request",

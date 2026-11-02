@@ -1,5 +1,7 @@
-// The GitHub Copilot surface: Copilot's agent in VS Code (the Copilot harness) and Copilot
-// CLI, which share one runtime and one home (`$COPILOT_HOME`, else `~/.copilot`).
+// The VS Code surface (`--client vscode`; `--client copilot` is its 0.1.28 name): VS Code's agent
+// through GitHub Copilot's runtime (the Copilot harness, and VS Code's Local agent) and Copilot CLI,
+// which share one runtime and one home (`$COPILOT_HOME`, else `~/.copilot`). The router names
+// these calls `vscode` (the owner's rename, 2026-11-02); 0.1.28 installs still send `copilot`.
 //
 // Three edits, and the KEY is in no command:
 //
@@ -20,7 +22,7 @@
 //    mcp-config.json's, so the user would get a server that cannot authenticate), and a
 //    `hooks.json` whose PreToolUse matcher Copilot matches (it compares the WHOLE tool name,
 //    `telem-telem_search`; Claude Code's `^mcp__plugin_…$` never fires there), whose lineage
-//    command passes `--harness copilot`, and which records the turn on UserPromptSubmit,
+//    command passes `--harness vscode`, and which records the turn on UserPromptSubmit,
 //    because Copilot's PreToolUse payload has no prompt_id.
 //  * `<copilot home>/hooks/telem.json` — the same two hooks as a user hook file, for VS Code's
 //    LOCAL agent (the Chat view's "Local" session target), which does not load Copilot plugins
@@ -49,7 +51,7 @@ export const COPILOT_PLUGIN_REF = "telem@telem"
 export const COPILOT_PLUGIN_DIRNAME = "copilot-plugin-telem"
 
 const LINEAGE_SCRIPT = "hooks/lineage.mjs"
-const HARNESS_FLAG = "--harness copilot"
+const HARNESS_FLAG = "--harness vscode"
 const TURN_COMMAND = 'node "${CLAUDE_PLUGIN_ROOT}/hooks/window.mjs" user-prompt'
 
 /** The Copilot home: `$COPILOT_HOME` if set, else `~/.copilot`. */
@@ -223,7 +225,7 @@ export function copilotPluginManifest(claudeManifest: string | null): string | n
 
 /**
  * The Copilot hooks.json from the Claude Code one: PreToolUse groups that run the lineage
- * hook get Copilot's matcher and `--harness copilot`, and a UserPromptSubmit handler
+ * hook get Copilot's matcher and `--harness vscode`, and a UserPromptSubmit handler
  * records the turn. Every other event is kept as it is. Null when the source has no
  * lineage hook to adapt.
  */

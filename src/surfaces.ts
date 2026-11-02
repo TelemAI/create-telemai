@@ -24,7 +24,7 @@ export type SurfaceId =
   | "openclaw"
   | "hermes"
   | "muse"
-  | "copilot"
+  | "vscode"
   | "cursor"
   | "devin"
   | "claude-skill"
@@ -140,13 +140,13 @@ export const SURFACES: readonly Surface[] = [
     needsPython: false,
   },
   {
-    id: "copilot",
-    label: "GitHub Copilot (plugin)",
+    id: "vscode",
+    label: "VS Code",
     group: "Agent hosts",
     // VS Code's Copilot agent has no command of its own on PATH, so there is nothing to
     // probe: offered always, never preselected. Copilot CLI uses the same home and plugin.
     probe: null,
-    hint: "Adds Telem search to GitHub Copilot (VS Code agent and Copilot CLI), with lineage",
+    hint: "Adds Telem search to VS Code's agent (Copilot and Local) and Copilot CLI, with lineage",
     // The hosted remote in ~/.copilot/mcp-config.json; the plugin's hooks run on node.
     needsPython: false,
   },
@@ -194,6 +194,13 @@ export const SURFACES: readonly Surface[] = [
 ]
 
 export const SURFACE_IDS: readonly SurfaceId[] = SURFACES.map((surface) => surface.id)
+
+/**
+ * Older `--client` names that still work. `copilot` shipped in 0.1.28 for the same surface
+ * (VS Code's agent through GitHub Copilot's runtime, and Copilot CLI); the owner renamed it to
+ * `vscode` on 2026-11-02. Scripts and docs written against 0.1.28 keep working.
+ */
+export const SURFACE_ALIASES: Readonly<Record<string, SurfaceId>> = { copilot: "vscode" }
 
 export function surfaceById(id: string): Surface | undefined {
   return SURFACES.find((surface) => surface.id === id)

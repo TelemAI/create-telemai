@@ -65,11 +65,12 @@ const ENVELOPE_VERSION = 1;
 // Code's Copilot harness). Matched on the suffix, never on a host's prefix.
 const TELEM_TOOL = /telem_(search|fetch)$/;
 
-// The hosts this hook knows. Claude Code is the default; the Copilot plugin's hooks.json
-// passes `--harness copilot` (GitHub Copilot's agent, in VS Code and Copilot CLI).
-// Hosts whose hook command passes `--harness <name>` (their hook files are written by the
-// installer, not hooks/hooks.json). Each name is also the router's client name.
-const HARNESSES = new Set([HARNESS, "copilot", "cursor", "devin"]);
+// The hosts this hook knows. Claude Code is the default (hooks/hooks.json passes no flag). The
+// others pass `--harness <name>` from a hook file the installer writes, and each name is also the
+// router's client name: `vscode` (VS Code's agent through GitHub Copilot's runtime, and Copilot
+// CLI; `copilot` is its 0.1.28 name and reads as `vscode`, see harnessArg), `cursor`, `devin`.
+const HARNESSES = new Set([HARNESS, "vscode", "cursor", "devin"]);
+const HARNESS_ALIASES = { copilot: "vscode" };
 const WINDOW_NONE = "none";
 const STATE_FILENAME = "window.json";
 
@@ -764,7 +765,7 @@ export function emit(payload, env = process.env, harness = HARNESS) {
     // telem_bridge to that tool's input. So the tool is checked here too: any other tool,
     // or a payload with no tool name, gets no output and runs unchanged.
     if (!TELEM_TOOL.test(String(payload.tool_name ?? ""))) return "";
-    if (harness === "copilot") payload = adaptCopilotPayload(payload);
+    if (harness === "vscode") payload = adaptCopilotPayload(payload);
     else if (harness === "cursor") payload = adaptCursorPayload(payload);
     else if (harness === "devin") payload = adaptDevinPayload(payload, env);
     const blocks = readConfigBlocks(payload.cwd, env);
@@ -795,7 +796,8 @@ export function emit(payload, env = process.env, harness = HARNESS) {
 // `--harness <name>` from the hook command; a missing or unknown name is Claude Code.
 export function harnessArg(argv) {
   const i = argv.indexOf("--harness");
-  const name = i >= 0 ? argv[i + 1] : undefined;
+  const given = i >= 0 ? argv[i + 1] : undefined;
+  const name = typeof given === "string" && Object.hasOwn(HARNESS_ALIASES, given) ? HARNESS_ALIASES[given] : given;
   return HARNESSES.has(name) ? name : HARNESS;
 }
 
