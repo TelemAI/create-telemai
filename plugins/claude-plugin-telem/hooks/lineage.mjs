@@ -48,15 +48,28 @@
 // providers / tier / no_cache), shipped as the envelope's top-level `fetch_options` key on
 // EVERY call, search included — each server path reads only its own slot.
 
-import { readFileSync, openSync, fstatSync, readSync, closeSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, openSync, fstatSync, readSync, closeSync, writeFileSync, renameSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { build_snapshot } from "./v5hash.mjs";
 import { ConfigRefusal, fetchBlockFromConfig, hostedBlocksFromConfig } from "./telem-config.mjs";
 
 const HARNESS = "claude-code";
 const ENVELOPE_VERSION = 1;
+
+// The tools this hook acts on: Telem's own search and fetch, under any host's naming
+// (`mcp__plugin_telem_telem__telem_search` in Claude Code, `telem-telem_search` in VS
+// Code's Copilot harness). Matched on the suffix, never on a host's prefix.
+const TELEM_TOOL = /telem_(search|fetch)$/;
+
+// The hosts this hook knows. Claude Code is the default; the Copilot plugin's hooks.json
+// passes `--harness copilot` (GitHub Copilot's agent, in VS Code and Copilot CLI).
+// Hosts whose hook command passes `--harness <name>` (their hook files are written by the
+// installer, not hooks/hooks.json). Each name is also the router's client name.
+const HARNESSES = new Set([HARNESS, "copilot", "cursor", "devin"]);
 const WINDOW_NONE = "none";
 const STATE_FILENAME = "window.json";
 
@@ -109,6 +122,248 @@ export function readWindowId(sessionId, path = stateFilePath()) {
   } catch {
     return WINDOW_NONE;
   }
+}
+
+// Copilot gives PreToolUse no prompt_id. Its UserPromptSubmit hook (window.mjs
+// "user-prompt") records each prompt's timestamp per session, and that is the turn.
+// Fail-open: no record reads as "none". Never throws.
+export function readTurnId(sessionId, path = stateFilePath()) {
+  try {
+    if (typeof sessionId !== "string" || !sessionId) return WINDOW_NONE;
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    const entry = state && state.sessions ? state.sessions[sessionId] : undefined;
+    const turn = entry ? entry.turn : undefined;
+    return typeof turn === "string" && turn ? turn : WINDOW_NONE;
+  } catch {
+    return WINDOW_NONE;
+  }
+}
+
+// Copilot's PreToolUse payload is Claude-shaped, but it has no prompt_id, tool_use_id or
+// transcript_path. Fill the two ids so buildEnvelope can run: the turn from the
+// UserPromptSubmit record, and a call id hashed from what tells two calls apart (two
+// calls in one assistant message can share a millisecond, so the timestamp alone is not
+// enough). An id the host does send is kept (VS Code's Local agent sends tool_use_id).
+// History stays [] on purpose (emit): Copilot keeps its model's reasoning encrypted.
+export function adaptCopilotPayload(payload, path = stateFilePath()) {
+  const out = { ...payload };
+  if (typeof out.prompt_id !== "string" || !out.prompt_id) out.prompt_id = readTurnId(out.session_id, path);
+  if (typeof out.tool_use_id !== "string" || !out.tool_use_id) {
+    const parts = [String(out.timestamp ?? ""), String(out.tool_name ?? ""), JSON.stringify(out.tool_input ?? null)];
+    out.tool_use_id = "copilot-" + createHash("sha256").update(parts.join("\u0000")).digest("hex").slice(0, 32);
+  }
+  return out;
+}
+
+// Cursor's preToolUse payload (its agent runtime's PreToolUseRequestQuery, lab-read
+// 2026-11-02) names the ids its own way: conversation_id (the chat), generation_id (one
+// model turn), tool_use_id (the call), plus cwd and workspace_roots. Map them onto the
+// Claude names buildEnvelope reads. A tool_input sent as a JSON string is parsed. An id
+// already under the Claude name is kept.
+export function adaptCursorPayload(payload) {
+  const out = { ...payload };
+  if (typeof out.session_id !== "string" || !out.session_id) out.session_id = out.conversation_id;
+  if (typeof out.prompt_id !== "string" || !out.prompt_id) out.prompt_id = cursorTurnId(out.generation_id);
+  if (typeof out.tool_input === "string") {
+    try {
+      out.tool_input = JSON.parse(out.tool_input);
+    } catch {
+      // not JSON: buildEnvelope refuses a non-object input, so the call runs unchanged
+    }
+  }
+  if (typeof out.cwd !== "string" || !out.cwd) {
+    const root = Array.isArray(out.workspace_roots) ? out.workspace_roots[0] : undefined;
+    if (typeof root === "string" && root) out.cwd = root;
+  }
+  return out;
+}
+
+// Cursor's reasoning. Cursor sends no reasoning in preToolUse, but its afterAgentThought hook
+// carries the model's thinking `text` for each step (conversation_id, generation_id; lab,
+// 2026-11-02; each thought arrives twice). `lineage.mjs --harness cursor --thought` records the
+// thoughts of the conversation's current turn in a small state file next to the hook scripts
+// (0600: it holds reasoning text, so never /tmp); the next Telem call takes them, so each call
+// carries the reasoning since the turn began or since the previous Telem call (the Codex rule).
+// A new turn drops the old turn's thoughts. Fail-open everywhere: a lost thought costs only
+// reasoning, never the call.
+const THOUGHTS_FILENAME = "cursor-thoughts.json";
+const THOUGHTS_MAX_CONVERSATIONS = 20;
+const THOUGHTS_MAX_PER_TURN = 200;
+
+/** Cursor's turn id. One of each thought's two copies carries the turn's generation_id with a
+ * step suffix (`<uuid>-0-dxxm`, `<uuid>-1-7sr5`, …; lab, 2026-11-02); preToolUse carries the bare
+ * uuid. Both mean the same turn. */
+export function cursorTurnId(id) {
+  if (typeof id !== "string") return id;
+  const m = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-\d+-[0-9a-z]+$/i.exec(id);
+  return m ? m[1] : id;
+}
+
+/** `<hook root>/cursor-thoughts.json`: the folder that holds `hooks/`, i.e. the installer's copy. */
+export function thoughtsFilePath() {
+  return join(dirname(dirname(fileURLToPath(import.meta.url))), THOUGHTS_FILENAME);
+}
+
+function readThoughts(path) {
+  try {
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    if (state && typeof state === "object" && state.conversations && typeof state.conversations === "object") return state;
+  } catch {
+    // missing or unreadable: start empty
+  }
+  return { version: 1, conversations: {} };
+}
+
+function writeThoughts(path, state) {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
+  renameSync(tmp, path);
+}
+
+/** Record one afterAgentThought. Never throws. */
+export function recordCursorThought(payload, path = thoughtsFilePath(), now = Date.now()) {
+  try {
+    if (payload === null || typeof payload !== "object") return;
+    const conversation = payload.conversation_id || payload.session_id;
+    const turn = cursorTurnId(payload.generation_id);
+    const text = typeof payload.text === "string" ? payload.text.trim() : "";
+    if (typeof conversation !== "string" || !conversation || typeof turn !== "string" || !turn || !text) return;
+    const state = readThoughts(path);
+    const prior = state.conversations[conversation];
+    const entry = prior && prior.turn === turn && Array.isArray(prior.thoughts) ? prior : { turn, thoughts: [] };
+    if (!entry.thoughts.includes(text) && entry.thoughts.length < THOUGHTS_MAX_PER_TURN) entry.thoughts.push(text);
+    entry.at = now;
+    state.conversations[conversation] = entry;
+    const ids = Object.keys(state.conversations);
+    if (ids.length > THOUGHTS_MAX_CONVERSATIONS) {
+      ids.sort((a, b) => (state.conversations[b].at || 0) - (state.conversations[a].at || 0));
+      for (const id of ids.slice(THOUGHTS_MAX_CONVERSATIONS)) delete state.conversations[id];
+    }
+    writeThoughts(path, state);
+  } catch {
+    // fail-open
+  }
+}
+
+/** The thoughts recorded for this turn since the last Telem call, joined; then cleared. "" if none. */
+export function takeCursorThoughts(conversation, turn, path = thoughtsFilePath()) {
+  try {
+    if (typeof conversation !== "string" || !conversation || typeof turn !== "string" || !turn) return "";
+    turn = cursorTurnId(turn);
+    const state = readThoughts(path);
+    const entry = state.conversations[conversation];
+    if (!entry || entry.turn !== turn || !Array.isArray(entry.thoughts) || !entry.thoughts.length) return "";
+    const text = entry.thoughts.join("\n\n").slice(0, HISTORY_TEXT_CAP);
+    state.conversations[conversation] = { ...entry, thoughts: [] };
+    writeThoughts(path, state);
+    return text;
+  } catch {
+    return "";
+  }
+}
+
+// Devin's reasoning. Devin's hooks carry no reasoning, but Devin Local / the Devin CLI keep each
+// session in a SQLite file (`<data>/devin/cli/sessions.db`, table message_nodes: one JSON chat
+// message per node, chained by parent_node_id). An assistant message holds its `thinking.thinking`
+// text and its `tool_calls` (ids match the hook's tool_use_id), and it is stored before the tool
+// runs (lab, 2026-11-02). From the node with this call, walk the chain back to the turn's user
+// message or to the previous Telem call, and send that thinking: the Codex rule. Read-only, through
+// Node's built-in SQLite (Node 22.13+); an older Node, a missing file or any error sends none.
+export function devinSessionsDbPath(env = process.env, home = homedir(), platform = process.platform) {
+  const candidates = [];
+  if (env.XDG_DATA_HOME) candidates.push(join(env.XDG_DATA_HOME, "devin", "cli", "sessions.db"));
+  candidates.push(join(home, ".local", "share", "devin", "cli", "sessions.db"));
+  if (platform === "darwin") candidates.push(join(home, "Library", "Application Support", "devin", "cli", "sessions.db"));
+  if (platform === "win32") {
+    for (const base of [env.LOCALAPPDATA, env.APPDATA]) if (base) candidates.push(join(base, "devin", "cli", "sessions.db"));
+  }
+  return candidates.find((path) => existsSync(path));
+}
+
+function loadSqlite() {
+  // node:sqlite prints an ExperimentalWarning on first load; the hook's stderr stays quiet.
+  const emitWarning = process.emitWarning;
+  process.emitWarning = () => {};
+  try {
+    return typeof process.getBuiltinModule === "function" ? process.getBuiltinModule("node:sqlite") : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    process.emitWarning = emitWarning;
+  }
+}
+
+function isTelemCall(call) {
+  if (!call || typeof call !== "object") return false;
+  if (typeof call.name === "string" && /^mcp__telem__telem_(search|fetch)$/.test(call.name)) return true;
+  const args = call.arguments && typeof call.arguments === "object" ? call.arguments : {};
+  return call.name === "mcp_call_tool" && args.server_name === "telem" && /^telem_(search|fetch)$/.test(String(args.tool_name));
+}
+
+/** The thinking that led to this call, oldest first, joined; "" when none can be read. */
+export function readDevinReasoning(sessionId, toolUseId, dbPath = devinSessionsDbPath()) {
+  let db;
+  try {
+    if (typeof sessionId !== "string" || !sessionId || typeof toolUseId !== "string" || !toolUseId || !dbPath) return "";
+    const sqlite = loadSqlite();
+    if (!sqlite || typeof sqlite.DatabaseSync !== "function") return "";
+    db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
+    const rows = db
+      .prepare("SELECT node_id, parent_node_id, chat_message FROM message_nodes WHERE session_id = ? ORDER BY row_id")
+      .all(sessionId);
+    const byNode = new Map();
+    let start;
+    for (const row of rows) {
+      let message;
+      try {
+        message = JSON.parse(row.chat_message);
+      } catch {
+        continue;
+      }
+      const node = { parent: row.parent_node_id, message };
+      byNode.set(row.node_id, node);
+      const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      if (message.role === "assistant" && calls.some((call) => call && call.id === toolUseId)) start = node;
+    }
+    if (!start) return "";
+    const texts = [];
+    const seen = new Set();
+    for (let node = start, steps = 0; node && steps < 10000; node = byNode.get(node.parent), steps++) {
+      const message = node.message;
+      if (message.role === "user" && message.metadata && message.metadata.is_user_input) break;
+      if (message.role !== "assistant") continue;
+      const calls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      if (node !== start && calls.some(isTelemCall)) break;
+      if (seen.has(message.message_id)) continue;
+      seen.add(message.message_id);
+      const thinking = message.thinking && typeof message.thinking.thinking === "string" ? message.thinking.thinking.trim() : "";
+      if (thinking) texts.unshift(thinking);
+    }
+    return texts.join("\n\n").slice(0, HISTORY_TEXT_CAP);
+  } catch {
+    return "";
+  } finally {
+    try {
+      if (db) db.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+// Devin's hook payload (Devin Local in Devin Desktop, and the Devin CLI: one harness)
+// carries session_id and a per-turn prompt_id, but no call id and no cwd; the project
+// root is in DEVIN_PROJECT_DIR. Each call gets a fresh id, so two calls in one turn are
+// two sibling nodes. An id the host does send is kept.
+export function adaptDevinPayload(payload, env = process.env) {
+  const out = { ...payload };
+  if (typeof out.tool_use_id !== "string" || !out.tool_use_id) {
+    out.tool_use_id = typeof out.tool_call_id === "string" && out.tool_call_id ? out.tool_call_id : "devin-" + randomUUID();
+  }
+  if ((typeof out.cwd !== "string" || !out.cwd) && typeof env.DEVIN_PROJECT_DIR === "string" && env.DEVIN_PROJECT_DIR) {
+    out.cwd = env.DEVIN_PROJECT_DIR;
+  }
+  return out;
 }
 
 // Read the transcript TAIL only — the last TAIL_BYTES bytes via a positioned fd read,
@@ -407,8 +662,9 @@ function cappedBlock(block, name, trim, warn) {
 // (hosted-fetch-options F4) rides as the top-level `fetch_options` key the same way. Both
 // ride INSIDE the bridge — the model-facing tool schema gains nothing (D9), and
 // updatedInput still adds exactly one key.
-export function buildEnvelope(payload, windowId, history = [], options = undefined, fetchOptions = undefined) {
+export function buildEnvelope(payload, windowId, history = [], options = undefined, fetchOptions = undefined, harness = HARNESS) {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const host = HARNESSES.has(harness) ? harness : HARNESS;
 
   const sessionId = payload.session_id;
   const promptId = payload.prompt_id;
@@ -426,7 +682,7 @@ export function buildEnvelope(payload, windowId, history = [], options = undefin
   const isSubagent = typeof agentId === "string" && agentId !== "";
 
   const lineage = {
-    harness: HARNESS,
+    harness: host,
     conversation_id: isSubagent ? `${sessionId}:${agentId}` : sessionId,
     window_id: resolvedWindow,
     message_id: promptId,
@@ -437,7 +693,7 @@ export function buildEnvelope(payload, windowId, history = [], options = undefin
   lineage.ancestors = isSubagent
     ? [
         build_snapshot({
-          harness: HARNESS,
+          harness: host,
           conversationId: sessionId,
           windowId: resolvedWindow,
           messageId: ORCH_CONST,
@@ -461,10 +717,13 @@ export function encodeBridge(envelope) {
 // The PreToolUse hookSpecificOutput, or null to emit nothing. updatedInput REPLACES
 // the whole tool input, so it MUST echo the original verbatim and add only
 // telem_bridge.
-export function buildHookOutput(payload, windowId, history = [], options = undefined, fetchOptions = undefined) {
-  const envelope = buildEnvelope(payload, windowId, history, options, fetchOptions);
+export function buildHookOutput(payload, windowId, history = [], options = undefined, fetchOptions = undefined, harness = HARNESS) {
+  const envelope = buildEnvelope(payload, windowId, history, options, fetchOptions, harness);
   if (envelope === null) return null;
   const telem_bridge = encodeBridge(envelope);
+  // Cursor reads a flat updated_input (merged over the call's input) and never needs a
+  // permission answer for it: none is sent, so the user's approval settings still apply.
+  if (harness === "cursor") return { updated_input: { ...payload.tool_input, telem_bridge } };
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -475,7 +734,10 @@ export function buildHookOutput(payload, windowId, history = [], options = undef
 
 // The PreToolUse output that refuses a call: Claude Code shows the reason to the model
 // and the tool call is not made.
-export function buildDenyOutput(reason) {
+export function buildDenyOutput(reason, harness = HARNESS) {
+  // Cursor answers in its own flat shape; Devin documents a top-level decision.
+  if (harness === "cursor") return { permission: "deny", user_message: reason, agent_message: reason };
+  if (harness === "devin") return { decision: "block", reason };
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",
@@ -493,20 +755,48 @@ export function buildDenyOutput(reason) {
 // telem_search calls carry both blocks alike (spec the contract; hosted-fetch-options F5). `env`
 // is the injectable seam for hermetic tests; the CLI path keeps process.env. Never
 // throws.
-export function emit(payload, env = process.env) {
+export function emit(payload, env = process.env, harness = HARNESS) {
   try {
     if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return "";
+    // hooks.json's matcher limits this hook to the Telem tools in Claude Code, but a host
+    // that reads Claude-format hooks and ignores matchers (VS Code's Local agent harness
+    // does) runs it before EVERY tool call, and the updatedInput below would then add
+    // telem_bridge to that tool's input. So the tool is checked here too: any other tool,
+    // or a payload with no tool name, gets no output and runs unchanged.
+    if (!TELEM_TOOL.test(String(payload.tool_name ?? ""))) return "";
+    if (harness === "copilot") payload = adaptCopilotPayload(payload);
+    else if (harness === "cursor") payload = adaptCursorPayload(payload);
+    else if (harness === "devin") payload = adaptDevinPayload(payload, env);
     const blocks = readConfigBlocks(payload.cwd, env);
     if (blocks.refusal !== undefined && /telem_search$/.test(String(payload.tool_name))) {
-      return JSON.stringify(buildDenyOutput(blocks.refusal));
+      return JSON.stringify(buildDenyOutput(blocks.refusal, harness));
     }
     const windowId = readWindowId(payload.session_id);
-    const history = readCurrentReasoning(payload);
-    const out = buildHookOutput(payload, windowId, history, blocks.options, blocks.fetchOptions);
+    // Claude Code: the turn's visible text from its transcript. Cursor: the thoughts its
+    // afterAgentThought hook recorded. Devin: the thinking in its session file (both above).
+    // Copilot keeps its reasoning encrypted, and VS Code's Local agent passes a transcript_path to
+    // its own chat log, which is not Claude Code's JSONL: those send none.
+    let history = [];
+    if (harness === HARNESS) history = readCurrentReasoning(payload);
+    else if (harness === "cursor" || harness === "devin") {
+      const reasoning =
+        harness === "cursor"
+          ? takeCursorThoughts(payload.session_id, payload.prompt_id)
+          : readDevinReasoning(payload.session_id, payload.tool_use_id, devinSessionsDbPath(env, env.HOME || env.USERPROFILE || homedir()));
+      if (reasoning) history = [{ role: "assistant", reasoning }];
+    }
+    const out = buildHookOutput(payload, windowId, history, blocks.options, blocks.fetchOptions, harness);
     return out === null ? "" : JSON.stringify(out);
   } catch {
     return "";
   }
+}
+
+// `--harness <name>` from the hook command; a missing or unknown name is Claude Code.
+export function harnessArg(argv) {
+  const i = argv.indexOf("--harness");
+  const name = i >= 0 ? argv[i + 1] : undefined;
+  return HARNESSES.has(name) ? name : HARNESS;
 }
 
 function isMain() {
@@ -523,7 +813,10 @@ if (isMain()) {
   process.stdin.on("end", () => {
     let output = "";
     try {
-      output = emit(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      // `--harness cursor --thought`: Cursor's afterAgentThought hook. It records, and answers nothing.
+      if (process.argv.includes("--thought")) recordCursorThought(payload);
+      else output = emit(payload, process.env, harnessArg(process.argv));
     } catch {
       output = "";
     }

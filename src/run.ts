@@ -49,6 +49,42 @@ import {
   museWebSearchOff,
   planMuseSettings,
 } from "./muse.ts"
+import {
+  COPILOT_PLUGIN_FILES,
+  COPILOT_URL,
+  copilotHome,
+  copilotHooksJson,
+  copilotMcpConfigPath,
+  copilotMcpUndoLine,
+  copilotPluginDir,
+  copilotPluginManifest,
+  copilotSettingsPath,
+  copilotSettingsUndoLine,
+  copilotUserHooks,
+  copilotUserHooksPath,
+  planCopilotMcpConfig,
+  planCopilotSettings,
+} from "./copilot.ts"
+import {
+  cursorHome,
+  cursorHookDir,
+  cursorHooksPath,
+  cursorHooksUndoLine,
+  cursorMcpPath,
+  cursorSkillPath,
+  planCursorHooks,
+} from "./cursor.ts"
+import {
+  devinConfigDir,
+  devinConfigPath,
+  devinConfigUndoLine,
+  devinHookCommand,
+  devinHookDir,
+  devinMcpPath,
+  devinSkillPath,
+  planDevinConfig,
+} from "./devin.ts"
+import { HOOK_SCRIPT_FILES, HOSTED_MCP_URL, SKILL_FILE, mcpJsonUndoLine, planMcpJson } from "./mcp-json.ts"
 import type { CodexHookTrustEntry, HostedRouting } from "./codex.ts"
 import {
   CODEX_HOOK_STATE_PATH,
@@ -851,6 +887,13 @@ async function planSurfaces(
       case "muse":
         await planMuse(ports, flags, ui, plan, home, context.apiKey, context.autoRouting)
         break
+      case "copilot":
+        planCopilot(ports, plan, home, context.apiKey, context.autoRouting)
+        break
+      case "cursor":
+      case "devin":
+        planEditorAgent(ports, plan, home, editorAgentSpec(ports, id, home), context.apiKey, context.autoRouting)
+        break
       case "claude-skill":
         planClaudeSkill(plan, tools)
         break
@@ -1216,6 +1259,281 @@ async function planMuse(
     return
   }
   setOutcome(plan, "muse", "installed", changes.join("; "))
+}
+
+/** What differs between the Cursor and Devin surfaces; cursor.ts and devin.ts say why. */
+type EditorAgentSpec = {
+  id: "cursor" | "devin"
+  /** The host's own directory, for the outcome line. */
+  dir: string
+  mcpPath: string
+  /** The file that registers the hook, and its edit. */
+  hookPath: string
+  planHook: (source: string | null) =>
+    | { status: "unchanged" }
+    | { status: "write"; contents: string; created: boolean; changes: string[]; addedHook: boolean }
+    | { status: "unparseable"; reason: string }
+  hookUndo: (edit: { created: boolean; addedHook: boolean }) => string
+  /** Where the hook scripts are copied (its `hooks/`), and where the skill goes. */
+  hookDir: string
+  skillPath: string
+}
+
+function editorAgentSpec(ports: Ports, id: "cursor" | "devin", home: string): EditorAgentSpec {
+  if (id === "cursor") {
+    const dir = cursorHome(home)
+    const hookDir = cursorHookDir(home)
+    const hookPath = cursorHooksPath(dir)
+    return {
+      id,
+      dir,
+      mcpPath: cursorMcpPath(dir),
+      hookPath,
+      planHook: (source) => planCursorHooks(source, hookDir, hookPath),
+      hookUndo: (edit) => cursorHooksUndoLine(edit, hookPath, hookDir),
+      hookDir,
+      skillPath: cursorSkillPath(dir),
+    }
+  }
+  const dir = devinConfigDir(ports.env, home, ports.platform)
+  const hookDir = devinHookDir(home)
+  const hookPath = devinConfigPath(dir)
+  return {
+    id,
+    dir,
+    mcpPath: devinMcpPath(dir),
+    hookPath,
+    planHook: (source) => planDevinConfig(source, devinHookCommand(hookDir), hookPath),
+    hookUndo: (edit) => devinConfigUndoLine(edit, hookPath, hookDir),
+    hookDir,
+    skillPath: devinSkillPath(dir),
+  }
+}
+
+/**
+ * The Cursor and Devin surfaces: the hosted server in the host's MCP file, the lineage hook
+ * registered in the host's own hook file (never Claude Code's settings.json, which both hosts
+ * also read), and the hook scripts and the Telem skill copied from the Claude Code plugin this
+ * package ships. The MCP file is written even when the plugin is not found: the search works
+ * without lineage.
+ */
+function planEditorAgent(
+  ports: Ports,
+  plan: Plan,
+  home: string,
+  spec: EditorAgentSpec,
+  apiKey: string | undefined,
+  autoRouting: HostedRouting | undefined,
+): void {
+  const { id } = spec
+  const sourceDir = resolveClaudePluginDir(ports)
+  const files = sourceDir
+    ? [
+        ...HOOK_SCRIPT_FILES.map((relative) => ({
+          path: join(spec.hookDir, ...relative.split("/")),
+          contents: ports.readText(join(sourceDir, ...relative.split("/"))),
+        })),
+        { path: spec.skillPath, contents: ports.readText(join(sourceDir, ...SKILL_FILE.split("/"))) },
+      ]
+    : null
+  const hookFound = files !== null && files.every((file) => file.contents !== null)
+
+  const mcpEdit = planMcpJson(ports.readText(spec.mcpPath), { apiKey, autoRouting }, spec.mcpPath)
+  if (mcpEdit.status === "unparseable") {
+    plan.notes.push(surfaceNote(id, mcpEdit.reason))
+    setOutcome(plan, id, "failed", mcpEdit.reason)
+    return
+  }
+  const hookEdit = hookFound ? spec.planHook(ports.readText(spec.hookPath)) : ({ status: "unchanged" } as const)
+  if (hookEdit.status === "unparseable") {
+    plan.notes.push(surfaceNote(id, hookEdit.reason))
+    setOutcome(plan, id, "failed", hookEdit.reason)
+    return
+  }
+
+  const changes: string[] = []
+  if (mcpEdit.status === "write") {
+    addFile(plan, {
+      path: spec.mcpPath,
+      contents: mcpEdit.contents,
+      secret: !mcpEdit.keyless && Boolean(apiKey),
+      created: mcpEdit.created,
+      reason: mcpEdit.changes.join("; "),
+      undo: mcpJsonUndoLine(mcpEdit, spec.mcpPath),
+    })
+    changes.push(`${spec.mcpPath}: ${mcpEdit.changes.join(", ")}`)
+    if (mcpEdit.keyless) {
+      plan.notes.push(
+        surfaceNote(
+          id,
+          `mcpServers.telem points at the hosted ${HOSTED_MCP_URL} but no API key was available to write. ` +
+            `Add "Authorization": "Bearer <your tlm_ key>" to its "headers" in ${spec.mcpPath}.`,
+        ),
+      )
+    }
+  }
+  // Rewritten when they differ, so a re-run ships hook and skill updates.
+  let copied = false
+  for (const file of hookFound ? files : []) {
+    const existing = ports.readText(file.path)
+    if (existing === file.contents) continue
+    addFile(plan, {
+      path: file.path,
+      contents: file.contents as string,
+      secret: false,
+      created: existing === null,
+      reason: "the telem lineage hook and skill",
+      undo: undoLine(file.path, existing === null),
+    })
+    copied = true
+  }
+  if (copied) changes.push(`copy the telem hook into ${spec.hookDir} and the skill to ${spec.skillPath}`)
+  if (hookEdit.status === "write") {
+    addFile(plan, {
+      path: spec.hookPath,
+      contents: hookEdit.contents,
+      secret: false,
+      created: hookEdit.created,
+      reason: hookEdit.changes.join("; "),
+      undo: spec.hookUndo(hookEdit),
+    })
+    changes.push(`${spec.hookPath}: ${hookEdit.changes.join(", ")}`)
+  }
+
+  if (!hookFound) {
+    const reason = "the telem hook and skill were not found in this package, so searches carry no lineage"
+    plan.notes.push(surfaceNote(id, `${reason}. Re-run with the published \`npx @telemai/create\`.`))
+    setOutcome(plan, id, "partial", changes.length ? `${changes.join("; ")}; ${reason}` : reason)
+    return
+  }
+  if (!changes.length) {
+    setOutcome(plan, id, "unchanged", `${spec.dir} already has the telem server and hook`)
+    return
+  }
+  setOutcome(plan, id, "installed", changes.join("; "))
+}
+
+/**
+ * The Copilot plugin's files, from the Claude Code plugin this package ships: the two
+ * manifests derived for Copilot (copilot.ts), the hooks and the skill as they are. A
+ * `null` contents means that file was missing from the source.
+ */
+function copilotPluginFiles(ports: Ports, sourceDir: string, targetDir: string): { path: string; contents: string | null }[] {
+  return COPILOT_PLUGIN_FILES.map((relative) => {
+    const raw = ports.readText(join(sourceDir, ...relative.split("/")))
+    const contents =
+      relative === ".claude-plugin/plugin.json"
+        ? copilotPluginManifest(raw)
+        : relative === "hooks/hooks.json"
+          ? copilotHooksJson(raw)
+          : raw
+    return { path: join(targetDir, ...relative.split("/")), contents }
+  })
+}
+
+/**
+ * The GitHub Copilot surface (VS Code's Copilot agent and Copilot CLI): the hosted server in
+ * Copilot's mcp-config.json, the Claude Code plugin copied to a stable directory with
+ * Copilot's own plugin.json and hooks.json (lineage + the turn record), and its
+ * registration in Copilot's settings.json. copilot.ts says why each piece has its shape.
+ */
+function planCopilot(
+  ports: Ports,
+  plan: Plan,
+  home: string,
+  apiKey: string | undefined,
+  autoRouting: HostedRouting | undefined,
+): void {
+  const copilotDir = copilotHome(ports.env, home)
+  const pluginDir = copilotPluginDir(home)
+  const sourceDir = resolveClaudePluginDir(ports)
+  const files = sourceDir
+    ? [
+        ...copilotPluginFiles(ports, sourceDir, pluginDir),
+        // VS Code's Local agent does not load plugins; it runs this user hook file instead.
+        { path: copilotUserHooksPath(copilotDir), contents: copilotUserHooks(pluginDir) },
+      ]
+    : null
+  const pluginFound = files !== null && files.every((file) => file.contents !== null)
+
+  const mcpPath = copilotMcpConfigPath(copilotDir)
+  const mcpEdit = planCopilotMcpConfig(ports.readText(mcpPath), { apiKey, autoRouting }, mcpPath)
+  if (mcpEdit.status === "unparseable") {
+    plan.notes.push(surfaceNote("copilot", mcpEdit.reason))
+    setOutcome(plan, "copilot", "failed", mcpEdit.reason)
+    return
+  }
+  const settingsPath = copilotSettingsPath(copilotDir)
+  const settingsEdit = pluginFound
+    ? planCopilotSettings(ports.readText(settingsPath), pluginDir, settingsPath)
+    : ({ status: "unchanged" } as const)
+  if (settingsEdit.status === "unparseable") {
+    plan.notes.push(surfaceNote("copilot", settingsEdit.reason))
+    setOutcome(plan, "copilot", "failed", settingsEdit.reason)
+    return
+  }
+
+  const changes: string[] = []
+  if (mcpEdit.status === "write") {
+    addFile(plan, {
+      path: mcpPath,
+      contents: mcpEdit.contents,
+      secret: !mcpEdit.keyless && Boolean(apiKey),
+      created: mcpEdit.created,
+      reason: mcpEdit.changes.join("; "),
+      undo: copilotMcpUndoLine(mcpEdit, mcpPath),
+    })
+    changes.push(`${mcpPath}: ${mcpEdit.changes.join(", ")}`)
+    if (mcpEdit.keyless) {
+      plan.notes.push(
+        surfaceNote(
+          "copilot",
+          `mcpServers.telem points at the hosted ${COPILOT_URL} but no API key was available to write. ` +
+            `Add "Authorization": "Bearer <your tlm_ key>" to its "headers" in ${mcpPath}.`,
+        ),
+      )
+    }
+  }
+  // Rewritten when they differ, so a re-run ships hook and skill updates. window.json,
+  // the hook's own state, is not in the list and survives.
+  let copied = false
+  for (const file of pluginFound ? files : []) {
+    const existing = ports.readText(file.path)
+    if (existing === file.contents) continue
+    addFile(plan, {
+      path: file.path,
+      contents: file.contents as string,
+      secret: false,
+      created: existing === null,
+      reason: "the telem plugin for Copilot (lineage hook and skill) and its user hook file",
+      undo: undoLine(file.path, existing === null),
+    })
+    copied = true
+  }
+  if (copied) changes.push(`copy the telem plugin into ${pluginDir}`)
+  if (settingsEdit.status === "write") {
+    addFile(plan, {
+      path: settingsPath,
+      contents: settingsEdit.contents,
+      secret: false,
+      created: settingsEdit.created,
+      reason: settingsEdit.changes.join("; "),
+      undo: copilotSettingsUndoLine(settingsEdit, settingsPath, pluginDir),
+    })
+    changes.push(`${settingsPath}: ${settingsEdit.changes.join(", ")}`)
+  }
+
+  if (!pluginFound) {
+    const reason = "the telem plugin was not found in this package, so searches carry no lineage and Copilot gets no skill"
+    plan.notes.push(surfaceNote("copilot", `${reason}. Re-run with the published \`npx @telemai/create\`.`))
+    setOutcome(plan, "copilot", "partial", changes.length ? `${changes.join("; ")}; ${reason}` : reason)
+    return
+  }
+  if (!changes.length) {
+    setOutcome(plan, "copilot", "unchanged", `${copilotDir} already has the telem server and plugin`)
+    return
+  }
+  setOutcome(plan, "copilot", "installed", changes.join("; "))
 }
 
 function resolveCodexPluginDir(ports: Ports): string | null {
@@ -2122,6 +2440,26 @@ export function keyTargetFiles(
     files.push({
       path: museSettingsPath(museConfigDir(ports.env, home)),
       why: "the Authorization header of mcpServers.telem — the hosted Telem MCP authenticates every request",
+    })
+  }
+  // Copilot's is unconditional too: mcp-config.json is written whether or not the plugin is found.
+  if (selected.includes("copilot")) {
+    files.push({
+      path: copilotMcpConfigPath(copilotHome(ports.env, home)),
+      why: "the Authorization header of mcpServers.telem in GitHub Copilot's mcp-config.json — the hosted Telem MCP authenticates every request",
+    })
+  }
+  // Cursor's and Devin's too: the MCP file is written whether or not the hook is found.
+  if (selected.includes("cursor")) {
+    files.push({
+      path: cursorMcpPath(cursorHome(home)),
+      why: "the Authorization header of mcpServers.telem in Cursor's mcp.json — the hosted Telem MCP authenticates every request",
+    })
+  }
+  if (selected.includes("devin")) {
+    files.push({
+      path: devinMcpPath(devinConfigDir(ports.env, home, ports.platform)),
+      why: "the Authorization header of mcpServers.telem in Devin's mcp_config.json — the hosted Telem MCP authenticates every request",
     })
   }
   if (selected.includes("claude-code") && claudePluginConfigApplies(ports, tools)) {

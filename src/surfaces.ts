@@ -24,6 +24,9 @@ export type SurfaceId =
   | "openclaw"
   | "hermes"
   | "muse"
+  | "copilot"
+  | "cursor"
+  | "devin"
   | "claude-skill"
   | "mcp-json"
 
@@ -134,6 +137,39 @@ export const SURFACES: readonly Surface[] = [
     hint: "Adds Telem search to Muse CLI, and records its reasoning",
     // The hosted remote, like Codex: a url + an auth header in settings.json, and a
     // user hook run by node. No local telem-mcp, so no Python.
+    needsPython: false,
+  },
+  {
+    id: "copilot",
+    label: "GitHub Copilot (plugin)",
+    group: "Agent hosts",
+    // VS Code's Copilot agent has no command of its own on PATH, so there is nothing to
+    // probe: offered always, never preselected. Copilot CLI uses the same home and plugin.
+    probe: null,
+    hint: "Adds Telem search to GitHub Copilot (VS Code agent and Copilot CLI), with lineage",
+    // The hosted remote in ~/.copilot/mcp-config.json; the plugin's hooks run on node.
+    needsPython: false,
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    group: "Agent hosts",
+    // Cursor's `cursor` command is optional (an AppImage install has none), so a probe would
+    // miss real installs: offered always, never preselected.
+    probe: null,
+    hint: "Adds Telem search to Cursor's agent, and records its reasoning",
+    // The hosted remote in ~/.cursor/mcp.json; the lineage hook runs on node.
+    needsPython: false,
+  },
+  {
+    id: "devin",
+    label: "Devin Desktop (formerly Windsurf)",
+    group: "Agent hosts",
+    // Devin Desktop puts no command on PATH by default (the bundled Devin CLI needs an admin
+    // switch), so there is nothing to probe: offered always, never preselected.
+    probe: null,
+    hint: "Adds Telem search to Devin Desktop's Devin Local agent and the Devin CLI, and records its reasoning",
+    // The hosted remote in ~/.config/devin/mcp_config.json; the lineage hook runs on node.
     needsPython: false,
   },
   {

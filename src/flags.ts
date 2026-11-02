@@ -260,7 +260,8 @@ Flags (they double as the non-interactive API):
   --client <name>               tool to install into; repeatable or comma-separated
                                 one or more of:
                                 ${SURFACE_IDS.slice(0, 4).join(", ")},
-                                ${SURFACE_IDS.slice(4).join(", ")}
+                                ${SURFACE_IDS.slice(4, 9).join(", ")},
+                                ${SURFACE_IDS.slice(9).join(", ")}
   --login                       credentials only: verify a key, write it, exit
   --base-url <url>              Telem deployment to configure and verify against
   --key-env <VAR>               read the API key from this environment variable
@@ -316,7 +317,7 @@ pass --dry-run, and the machine is untouched. The commit is not atomic across
 files, though — if it fails part way it names the files that already landed.
 
 The API key never goes on a command line and is never printed. It is written to
-at most five files, all 0600 — which of them depends on what you install:
+at most eight files, all 0600 — which of them depends on what you install:
   ~/.telem/credentials.json   always; every surface falls back to it
   ~/.codex/config.toml        with --client codex: the Authorization header of
                               [mcp_servers.telem], which the hosted Telem MCP
@@ -327,4 +328,9 @@ at most five files, all 0600 — which of them depends on what you install:
                               which the plugin's inline MCP server reads
   ~/.config/muse/settings.json  with --client muse: the Authorization header of
                               mcpServers.telem, which the hosted Telem MCP
-                              authenticates per request`
+                              authenticates per request
+  ~/.copilot/mcp-config.json  with --client copilot: the same header, for GitHub
+                              Copilot (VS Code's agent and Copilot CLI)
+  ~/.cursor/mcp.json          with --client cursor: the same header, for Cursor
+  ~/.config/devin/mcp_config.json  with --client devin: the same header, for
+                              Devin Desktop (formerly Windsurf) and the Devin CLI`

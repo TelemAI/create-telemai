@@ -79,6 +79,13 @@ export function applyEvent(phase, payload, path = stateFilePath()) {
         entry.generation += 1; // pre-compact never reached us; bump here
       }
       state.sessions[sessionId] = entry;
+    } else if (phase === "user-prompt") {
+      // Copilot's PreToolUse has no prompt_id, so each prompt's timestamp is the turn id
+      // lineage.mjs reads (readTurnId). Only the Copilot plugin's hooks.json calls this.
+      const entry = existing || { generation: 0, open: false };
+      const ts = payload.timestamp;
+      entry.turn = typeof ts === "string" && ts ? ts : new Date().toISOString();
+      state.sessions[sessionId] = entry;
     } else {
       return; // unknown phase: nothing to do
     }
