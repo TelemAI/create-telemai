@@ -18,14 +18,15 @@ import { existsSync, readTextSync } from "./fsops.ts"
 import { run } from "./run.ts"
 import { loadClackUi } from "./ui.ts"
 
-export const VERSION = "0.1.29"
+export const VERSION = "0.1.30"
 
 /** Where `scripts/copy-plugins.mjs` puts the plugin packages inside this one. */
 export const PACKAGED_PLUGINS_DIR = "plugins"
 
 /**
- * The the sibling plugin source the Claude planner registers as a local
- * marketplace. `TELEM_CLAUDE_PLUGIN_DIR` wins (the E2E gate / an unusual layout).
+ * The the sibling plugin source the Claude planner copies to
+ * `~/.telem/plugins/claude-plugin-telem` (the folder it then registers as a local
+ * marketplace). `TELEM_CLAUDE_PLUGIN_DIR` wins (the E2E gate / an unusual layout).
  */
 function resolveClaudePluginDir(): string | undefined {
   return resolvePluginDir("TELEM_CLAUDE_PLUGIN_DIR", "claude-plugin-telem")

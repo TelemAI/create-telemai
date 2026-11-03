@@ -47,11 +47,17 @@
 // one resolution also yields the fetch block (fetchProviders / fetchTier / fetchNoCache ->
 // providers / tier / no_cache), shipped as the envelope's top-level `fetch_options` key on
 // EVERY call, search included — each server path reads only its own slot.
+//
+// A BROKEN CONFIG FILE, TOLD TO THE USER (Claude Code only): stderr is hidden on this host,
+// so a telem.json the reader ignores (unreadable, not UTF-8, not JSON, not an object) is
+// also said in the hook output's top-level `systemMessage`, which Claude Code shows to the
+// user and not to the model. Once per change of that file (configNotice, below). Never in
+// updatedInput or permissionDecisionReason, which the model sees.
 
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, openSync, fstatSync, readSync, closeSync, writeFileSync, renameSync, existsSync } from "node:fs";
+import { readFileSync, openSync, fstatSync, readSync, closeSync, writeFileSync, renameSync, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { build_snapshot } from "./v5hash.mjs";
@@ -530,6 +536,104 @@ function warnToStderr(message) {
   }
 }
 
+// The user-only notice for a broken Telem config file (Claude Code only). The reader
+// (telem-config.mjs) already ignores such a file and warns `[telem] ignoring <path>:
+// <reason>`; this turns those warnings into one short line for the hook's `systemMessage`.
+// It speaks once per CHANGE of the file: a stamp file next to window.json keeps the stat
+// signature (mtime and size, as config-core's fileSignature) of each file already told, so
+// the same broken file stays quiet on the next calls and speaks again after an edit.
+const NOTICE_FILENAME = "config-notice.json";
+const NOTICE_MAX_FILES = 20;
+const IGNORED_FILE = /^\[telem\] ignoring (.+?telem\.json): (.*)$/s;
+
+/** `<plugin root>/config-notice.json`, the folder that holds window.json. */
+export function noticeFilePath(env = process.env) {
+  const root = env.CLAUDE_PLUGIN_ROOT;
+  const dir = typeof root === "string" && root.trim() ? root : env.TMPDIR || "/tmp";
+  return join(dir, NOTICE_FILENAME);
+}
+
+// The reader's reason, in a few plain words.
+function fileProblem(reason) {
+  if (reason === "not valid UTF-8") return "not valid UTF-8";
+  if (reason === "expected a JSON object") return "not a JSON object";
+  if (reason === "unreadable" || /^E[A-Z]+\b/.test(reason)) return "could not be read";
+  return "not valid JSON";
+}
+
+// The config files the reader ignored, from its warnings: `[{ path, problem }]`.
+export function ignoredConfigFiles(warnings) {
+  const out = [];
+  for (const warning of Array.isArray(warnings) ? warnings : []) {
+    const m = IGNORED_FILE.exec(String(warning));
+    // A file path is absolute (the reader joins it onto cwd or the telem dir); the other
+    // "ignoring" warnings (TELEM_CONFIG_DIR, providerOverrides, ...) name no file.
+    if (!m || !isAbsolute(m[1])) continue;
+    if (!out.some((file) => file.path === m[1])) out.push({ path: m[1], problem: fileProblem(m[2]) });
+  }
+  return out;
+}
+
+function statSignature(path) {
+  try {
+    const stat = statSync(path);
+    return `${stat.mtimeMs}:${stat.size}`;
+  } catch {
+    return "gone";
+  }
+}
+
+function readNoticeStamp(path) {
+  try {
+    const state = JSON.parse(readFileSync(path, "utf8"));
+    if (state && typeof state === "object" && state.files && typeof state.files === "object") return state;
+  } catch {
+    // missing or unreadable: nothing told yet
+  }
+  return { version: 1, files: {} };
+}
+
+/**
+ * The `systemMessage` for the config files the reader ignored this call, or undefined when
+ * there are none or each one was already told in its current state. Records what it tells
+ * in the stamp file (a lost write only means the line is said again). Never throws.
+ */
+export function configNotice(warnings, env = process.env, path = undefined) {
+  try {
+    const files = ignoredConfigFiles(warnings);
+    if (!files.length) return undefined;
+    // Inside the try: a hostile env must not throw past here.
+    const stampPath = path ?? noticeFilePath(env);
+    const stamp = readNoticeStamp(stampPath);
+    const fresh = [];
+    for (const file of files) {
+      const signature = statSignature(file.path);
+      if (stamp.files[file.path] === signature) continue;
+      delete stamp.files[file.path];
+      stamp.files[file.path] = signature;
+      fresh.push(file);
+    }
+    if (!fresh.length) return undefined;
+    const kept = Object.keys(stamp.files);
+    for (const old of kept.slice(0, Math.max(0, kept.length - NOTICE_MAX_FILES))) delete stamp.files[old];
+    try {
+      const tmp = `${stampPath}.${process.pid}.tmp`;
+      writeFileSync(tmp, JSON.stringify(stamp), { mode: 0o600 });
+      renameSync(tmp, stampPath);
+    } catch {
+      // not recorded: the line is said again next time, which beats never saying it
+    }
+    const home = env.HOME || env.USERPROFILE || homedir();
+    const shown = (file) => {
+      const name = home && file.path.startsWith(home + sep) ? `~${file.path.slice(home.length)}` : file.path;
+      return `${name} (${file.problem})`;
+    };
+    return `Telem: ignored ${fresh.map(shown).join(" and ")}. Searches and page reads use your other settings and Telem's defaults.`;
+  } catch {
+    return undefined;
+  }
+}
+
 // Resolve the user's .telem config into the hosted `options` and `fetch_options` payloads
 // (hosted-options the design notes/D8; hosted-fetch-options spec F5). This is the WRAPPER above
 // the vendored, unforked reader in telem-config.mjs:
@@ -768,9 +872,25 @@ export function emit(payload, env = process.env, harness = HARNESS) {
     if (harness === "vscode") payload = adaptCopilotPayload(payload);
     else if (harness === "cursor") payload = adaptCursorPayload(payload);
     else if (harness === "devin") payload = adaptDevinPayload(payload, env);
-    const blocks = readConfigBlocks(payload.cwd, env);
+    // The reader's warnings still go to stderr; a copy is kept for the user notice below.
+    const warnings = [];
+    const warn = (message) => {
+      warnToStderr(message);
+      warnings.push(message);
+    };
+    const blocks = readConfigBlocks(payload.cwd, env, warn);
+    // Claude Code only: a broken config file is also told to the user, in the output's
+    // top-level systemMessage (never in what the model sees). Other hosts are unchanged.
+    const told = (out) => {
+      if (out === null) return "";
+      if (harness === HARNESS) {
+        const notice = configNotice(warnings, env);
+        if (notice) out.systemMessage = notice;
+      }
+      return JSON.stringify(out);
+    };
     if (blocks.refusal !== undefined && /telem_search$/.test(String(payload.tool_name))) {
-      return JSON.stringify(buildDenyOutput(blocks.refusal, harness));
+      return told(buildDenyOutput(blocks.refusal, harness));
     }
     const windowId = readWindowId(payload.session_id);
     // Claude Code: the turn's visible text from its transcript. Cursor: the thoughts its
@@ -786,8 +906,7 @@ export function emit(payload, env = process.env, harness = HARNESS) {
           : readDevinReasoning(payload.session_id, payload.tool_use_id, devinSessionsDbPath(env, env.HOME || env.USERPROFILE || homedir()));
       if (reasoning) history = [{ role: "assistant", reasoning }];
     }
-    const out = buildHookOutput(payload, windowId, history, blocks.options, blocks.fetchOptions, harness);
-    return out === null ? "" : JSON.stringify(out);
+    return told(buildHookOutput(payload, windowId, history, blocks.options, blocks.fetchOptions, harness));
   } catch {
     return "";
   }

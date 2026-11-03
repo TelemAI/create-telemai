@@ -28,13 +28,19 @@ import { dirname, join, resolve } from "node:path"
 
 import { credentialsPath, resolveTelemDir, userConfigPath } from "../config-core/files.ts"
 import {
-  CLAUDE_MARKETPLACE,
+  CLAUDE_PLUGIN_FILES,
   CLAUDE_PLUGIN_REF,
   CLAUDE_USER_CONFIG_KEY,
+  claudeAllowRulesMissing,
   claudeConfigDir,
+  claudeKnownMarketplacesPath,
+  claudeMarketplaceSource,
   claudePluginConfigPath,
+  claudePluginCopyDir,
+  claudePluginUndoLine,
   claudeWebRulesMissing,
   planClaudePluginConfig,
+  planClaudeTelemAllow,
   planClaudeWebDeny,
   type ClaudePluginConfigEdit,
 } from "./claude.ts"
@@ -206,10 +212,11 @@ export type Ports = {
   loadUi: () => Promise<Ui>
   /**
    * Absolute path to the the sibling plugin source the Claude Code planner
-   * registers as a local marketplace. The composition root (index.ts) fills this
-   * in from the package layout; a run without it (or without the plugin dir on
-   * disk) falls back to printing the two install commands for the user to run by
-   * hand. `TELEM_CLAUDE_PLUGIN_DIR` in the env overrides it (the E2E gate path).
+   * copies to `~/.telem/plugins/claude-plugin-telem` and registers from there (never
+   * from here: under npx this is the npm cache). The composition root (index.ts) fills
+   * this in from the package layout; a run without it (or without the plugin dir on
+   * disk) installs nothing and says how to re-run. `TELEM_CLAUDE_PLUGIN_DIR` in the env
+   * overrides it (the E2E gate path).
    */
   claudePluginDir?: string
   /**
@@ -1005,6 +1012,21 @@ function resolveClaudePluginDir(ports: Ports): string | null {
   return fromPorts || null
 }
 
+/**
+ * The packaged Claude Code plugin the planner copies, read file by file
+ * (`CLAUDE_PLUGIN_FILES`; a `null` contents means that file is missing), or null when
+ * the source folder is not there at all. One reader for `planClaudeCode` and
+ * `claudePluginConfigApplies`, so the pre-paste note and the planner cannot drift.
+ */
+function claudePluginSource(ports: Ports): { dir: string; files: { relative: string; contents: string | null }[] } | null {
+  const dir = resolveClaudePluginDir(ports)
+  if (!dir || !ports.exists(dir)) return null
+  return {
+    dir,
+    files: CLAUDE_PLUGIN_FILES.map((relative) => ({ relative, contents: ports.readText(join(dir, ...relative.split("/"))) })),
+  }
+}
+
 async function planClaudeCode(
   ports: Ports,
   flags: Flags,
@@ -1015,9 +1037,11 @@ async function planClaudeCode(
   apiKey: string | undefined,
 ): Promise<void> {
   const claude = tools.claude?.path
-  const pluginDir = resolveClaudePluginDir(ports)
-  const marketplaceAdd = ["claude", "plugin", "marketplace", "add", pluginDir ?? "<claude-plugin-telem dir>"]
-  const install = ["claude", "plugin", "install", CLAUDE_PLUGIN_REF]
+  // The folder Claude Code runs the plugin from: a copy outside the npx cache (claude.ts).
+  const copyDir = claudePluginCopyDir(home)
+  // Only an installer run makes the copy, so the hand-run advice is the installer itself,
+  // never `marketplace add` of a folder that does not exist yet (or of the npx cache).
+  const rerun = ["npx", "@telemai/create", "--client", "claude-code"]
 
   // A plugin with no key cannot authenticate, and that is just as true on the two
   // guided paths below — which is where the warning used to be unreachable, because it
@@ -1030,22 +1054,26 @@ async function planClaudeCode(
   }
 
   if (!claude) {
-    plan.notes.push(notOnPathNote("claude-code", "claude", [marketplaceAdd, install]))
-    setOutcome(plan, "claude-code", "manual", "claude is not on PATH; commands printed below")
+    plan.notes.push(notOnPathNote("claude-code", "claude", [rerun]))
+    setOutcome(plan, "claude-code", "manual", "claude is not on PATH; the command is printed below")
     return
   }
-  if (!pluginDir || !ports.exists(pluginDir)) {
-    // The plugin installs from a local checkout of the sibling plugin (the
-    // public marketplace listing is a follow-up, spec Q3). Without that dir we
-    // cannot register the marketplace, so guide rather than plan a broken command.
+  const pluginSource = claudePluginSource(ports)
+  const missing = pluginSource ? pluginSource.files.filter((file) => file.contents === null).map((file) => file.relative) : []
+  if (!pluginSource || missing.length) {
+    // The plugin installs from the the sibling plugin this package carries. Without
+    // all of it there is nothing to copy, so guide rather than register a broken folder.
+    const why = pluginSource
+      ? `the bundled telem plugin at ${pluginSource.dir} is missing ${missing.join(", ")}`
+      : "the bundled telem plugin source was not found"
     plan.notes.push(
       surfaceNote(
         "claude-code",
-        "the bundled telem plugin source was not found. " +
-          `Point TELEM_CLAUDE_PLUGIN_DIR at it, then run:\n\n    ${marketplaceAdd.join(" ")}\n    ${install.join(" ")}`,
+        `${why}, so this was not installed. Re-run with the published \`npx @telemai/create\`, ` +
+          `or point TELEM_CLAUDE_PLUGIN_DIR at a claude-plugin-telem folder and run:\n\n    ${rerun.join(" ")}`,
       ),
     )
-    setOutcome(plan, "claude-code", "manual", "claude-plugin-telem source not found; commands printed below")
+    setOutcome(plan, "claude-code", "manual", pluginSource ? "claude-plugin-telem source incomplete" : "claude-plugin-telem source not found")
     return
   }
 
@@ -1054,7 +1082,8 @@ async function planClaudeCode(
   // a cancelled run leaves it unwritten. Only staged when a key is configured; a
   // keyless run still installs the plugin (it just cannot authenticate yet).
   //
-  // The same file carries the second, consent-gated edit: "WebSearch" and "WebFetch"
+  // The same file carries two more edits. The allow rules for Telem search and fetch
+  // (below) need no question. The consent-gated one is "WebSearch" and "WebFetch"
   // in permissions.deny, which switches Claude Code's default web search and fetch to
   // Telem (owner design, 2026-10-26; WebFetch and the "switch the default" wording,
   // owner 2026-11-03; Codex's web_search step, below, is the model). Asked only here,
@@ -1062,7 +1091,8 @@ async function planClaudeCode(
   // leave Claude Code with no web search at all — and skipped when both rules are
   // already there: a Yes that changes nothing is noise. A file that has only one (an
   // install from before WebFetch was added) is asked about the other.
-  const configPath = claudePluginConfigPath(claudeConfigDir(ports.env, home))
+  const configDir = claudeConfigDir(ports.env, home)
+  const configPath = claudePluginConfigPath(configDir)
   const source = ports.readText(configPath)
   let contents = source
   const reasons: string[] = []
@@ -1083,6 +1113,34 @@ async function planClaudeCode(
   if (apiKey) {
     const keyed = planClaudePluginConfig(contents, apiKey, configPath)
     if (!stage(keyed, `store TELEM_API_KEY in the ${CLAUDE_PLUGIN_REF} plugin's userConfig`, `remove the "${CLAUDE_PLUGIN_REF}" entry`)) return
+  }
+  // Telem search and fetch in permissions.allow, so Claude Code runs them without a
+  // prompt (owner, 2026-11-03: "for no approval prompt, we just set allow for 2 tools
+  // right, during installing"). No question, on every install and update, keyed or not:
+  // the two tools only read the web, and a plugin cannot ship allow rules itself. Never
+  // the monitor tools. A tool the user's own deny or ask rule covers gets no allow rule
+  // (that rule wins in Claude Code anyway), and the user is told why.
+  const allowRules = claudeAllowRulesMissing(contents)
+  const allowed = planClaudeTelemAllow(contents, configPath)
+  const allowList = allowRules.add.map((rule) => `"${rule}"`).join(" and ")
+  if (!stage(allowed, "allow Telem search and page reads without asking", `remove ${allowList} from permissions.allow`)) return
+  const blockedBy = new Map<string, { list: "deny" | "ask"; by: string; rules: string[] }>()
+  for (const { rule, list, by } of allowRules.blocked) {
+    const key = `${list}\u0000${by}`
+    const entry = blockedBy.get(key) ?? { list, by, rules: [] }
+    entry.rules.push(rule)
+    blockedBy.set(key, entry)
+  }
+  for (const { list, by, rules } of blockedBy.values()) {
+    const them = rules.length > 1 ? "them" : "it"
+    plan.notes.push(
+      surfaceNote(
+        "claude-code",
+        `your own permissions.${list} rule "${by}" in ${abbreviateHome(configPath, home)} covers ${rules.join(" and ")}, ` +
+          `and your rule wins: the installer added no allow rule for ${them}, so Claude Code ` +
+          (list === "ask" ? "still asks before each call" : `still blocks ${them}`),
+      ),
+    )
   }
   const missingWebRules = claudeWebRulesMissing(source)
   const webRules = missingWebRules.map((rule) => `"${rule}"`).join(" and ")
@@ -1109,50 +1167,85 @@ async function planClaudeCode(
     })
   }
 
-  // Read-only probe: `claude plugin marketplace add`/`install` on an already
-  // registered plugin errors, so an already-installed plugin takes the UPGRADE path
-  // rather than the install path. The userConfig write above still runs (idempotent
-  // bytes).
+  // Where Claude Code runs the plugin from. Claude Code 2.1.317 runs a directory-sourced
+  // plugin IN PLACE from the folder its marketplace names; the copy it makes under
+  // ~/.claude/plugins/cache/ is not used (live check, 2026-11-03). This package's own
+  // folder, under npx, is in the npm cache, and when that folder went the plugin went
+  // with it, without a message — and the old re-run path (`marketplace update` +
+  // `plugin update`) never pointed Claude Code anywhere else, so it then failed on
+  // every run. Hence the copy in ~/.telem/plugins, and the same commands on every run.
   //
-  // Upgrading is not optional and skipping it was a real break: Claude Code COPIES a
-  // directory-sourced plugin into `~/.claude/plugins/cache/<marketplace>/<plugin>/
-  // <version>/`, so a machine that installed once keeps running the hooks it copied
-  // then — forever — while the npm package underneath it moves on. Every existing
-  // install silently stayed on the old hooks through a re-run of the one-liner.
-  // `marketplace update` re-reads this package's directory, and `plugin update`
-  // re-copies when the plugin's own version moved, which is why that version has to
-  // be bumped whenever the hooks change (probe: `plugin update` on an unbumped
-  // plugin answers "already at the latest version" and copies nothing).
-  const listed = ports.exec([claude, "plugin", "list"])
-  if ((listed.status === 0 ? listed.stdout : "").includes("telem")) {
+  // A `telem` marketplace from GitHub or git (the public mirror, added by hand) is the
+  // user's choice: nothing is copied or repointed, only `plugin update` runs.
+  const registered = claudeMarketplaceSource(source, ports.readText(claudeKnownMarketplacesPath(configDir)))
+  const update = ["claude", "plugin", "update", CLAUDE_PLUGIN_REF]
+  if (registered.kind === "other") {
+    plan.notes.push(surfaceNote("claude-code", `Claude Code uses the plugin from ${registered.from}; the installer left that as it is.`))
     plan.commands.push({
       surface: "claude-code",
-      argv: ["claude", "plugin", "marketplace", "update", CLAUDE_MARKETPLACE],
-      reason: "re-read the telem marketplace from this package",
+      argv: update,
+      reason: "update the telem plugin from its own marketplace",
       optional: true,
     })
-    plan.commands.push({
-      surface: "claude-code",
-      argv: ["claude", "plugin", "update", CLAUDE_PLUGIN_REF],
-      reason: "copy this package's hooks over the previously installed ones",
-      optional: true,
-    })
-    setOutcome(plan, "claude-code", "installed", "the telem plugin was already there; updated it in place")
+    setOutcome(plan, "claude-code", "installed", `the telem plugin comes from ${registered.from}; left as it is; claude plugin update telem@telem`)
     return
   }
+
+  // The copy: every plugin file, unchanged, written over the old one only where it
+  // differs. The folder is never removed, so the hook's own state there (window.json,
+  // config-notice.json) survives a re-run.
+  let copied = false
+  for (const file of pluginSource.files) {
+    const path = join(copyDir, ...file.relative.split("/"))
+    const existing = ports.readText(path)
+    if (existing === file.contents) continue
+    addFile(plan, {
+      path,
+      contents: file.contents as string,
+      secret: false,
+      created: existing === null,
+      reason: "the telem Claude Code plugin (hosted MCP, lineage hooks and skill)",
+      undo: claudePluginUndoLine(copyDir),
+    })
+    copied = true
+  }
+
+  // `marketplace add <copy>` registers the folder, or repoints an existing `telem`
+  // marketplace in place and keeps the key and enabledPlugins (even when the old folder
+  // is gone), or is a no-op that exits 0. `plugin install` installs, or exits 0 when it
+  // is already installed. On a re-run `plugin update` re-records the version; the copied
+  // files are live at the next session start without it. NEVER `marketplace remove` or
+  // `plugin uninstall` here: both delete pluginConfigs, which is the key.
   plan.commands.push({
     surface: "claude-code",
-    argv: marketplaceAdd,
-    reason: "register the local telem plugin marketplace",
+    argv: ["claude", "plugin", "marketplace", "add", copyDir],
+    reason: "register the telem plugin folder with Claude Code",
     optional: false,
   })
   plan.commands.push({
     surface: "claude-code",
-    argv: install,
+    argv: ["claude", "plugin", "install", CLAUDE_PLUGIN_REF],
     reason: "install the telem Claude Code plugin (hosted MCP + lineage hook)",
     optional: false,
   })
-  setOutcome(plan, "claude-code", "installed", "claude plugin marketplace add + plugin install telem")
+  if (registered.kind === "directory") {
+    plan.commands.push({
+      surface: "claude-code",
+      argv: update,
+      reason: "record the telem plugin's new version",
+      optional: true,
+    })
+  }
+  const steps = [
+    ...(copied ? [`copy the telem plugin into ${copyDir}`] : []),
+    ...(registered.kind === "directory" && registered.path !== copyDir
+      ? [`point the telem marketplace at it instead of ${registered.path || "its old folder"}`]
+      : []),
+    registered.kind === "directory"
+      ? "claude plugin marketplace add + plugin install + plugin update telem"
+      : "claude plugin marketplace add + plugin install telem",
+  ]
+  setOutcome(plan, "claude-code", "installed", steps.join("; "))
 }
 
 /**
@@ -2491,14 +2584,14 @@ export function keyTargetFiles(
  * Can this run put the key in the Claude plugin's userConfig at all?
  *
  * The two guards `planClaudeCode` returns `manual` on, read in one place so the
- * pre-paste note and the planner cannot drift: no `claude` binary, or no
- * the sibling plugin source to register, means nothing is installed and nothing
- * is staged — settings.json included.
+ * pre-paste note and the planner cannot drift: no `claude` binary, or no complete
+ * the sibling plugin source to copy, means nothing is installed and nothing is
+ * staged — settings.json included.
  */
 function claudePluginConfigApplies(ports: Ports, tools: Record<string, ToolInfo>): boolean {
   if (!tools.claude?.path) return false
-  const pluginDir = resolveClaudePluginDir(ports)
-  return Boolean(pluginDir && ports.exists(pluginDir))
+  const source = claudePluginSource(ports)
+  return Boolean(source && source.files.every((file) => file.contents !== null))
 }
 
 /** Shown when the server refuses the key already on disk (401), before the key choice. */
@@ -3161,11 +3254,13 @@ function emit(
   if (summary.files.length || summary.removals.length) {
     blocks.push({
       title: "Undo",
+      // Deduped: every removal in one migration shares the same undo line, and so does
+      // every file of one copied plugin folder; printing it eight times helps nobody.
       body: [
-        ...summary.files.map((file) => short(file.undo)),
-        // Deduped: every removal in one migration shares the same undo line, and
-        // printing "re-install the older hook" three times helps nobody.
-        ...new Set(summary.removals.map((removal) => short(removal.undo))),
+        ...new Set([
+          ...summary.files.map((file) => short(file.undo)),
+          ...summary.removals.map((removal) => short(removal.undo)),
+        ]),
       ],
     })
   }
