@@ -276,8 +276,8 @@ export function planMuseSettings(source: string | null, input: MuseSettingsInput
     // The old value rides in the change text, so the undo can put it back.
     changes.push(
       webSearch.mode === undefined
-        ? 'set tools.web_search.mode = "off" so Muse searches through Telem'
-        : `set tools.web_search.mode = "off" so Muse searches through Telem (was ${JSON.stringify(webSearch.mode)})`,
+        ? `set tools.web_search.mode = "off" so Muse's default web search and fetch is Telem`
+        : `set tools.web_search.mode = "off" so Muse's default web search and fetch is Telem (was ${JSON.stringify(webSearch.mode)})`,
     )
   }
 

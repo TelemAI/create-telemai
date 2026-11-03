@@ -24,7 +24,7 @@ export type Flags = {
   dryRun: boolean
   project: boolean
   codexDisableWebSearch: boolean
-  /** Non-interactive consent to add "WebSearch" to Claude Code's permissions.deny. */
+  /** Non-interactive consent to add "WebSearch" and "WebFetch" to Claude Code's permissions.deny. */
   claudeDisableWebSearch: boolean
   /** Non-interactive consent to set tools.web_search.mode = "off" in Muse's settings.json. */
   museDisableWebSearch: boolean
@@ -275,15 +275,17 @@ Flags (they double as the non-interactive API):
                                 accuracy is available now; latency and search_cost
                                 routing are coming shortly
   --project                     also write <cwd>/.telem/telem.json
-  --codex-disable-web-search    also set web_search = "disabled" in Codex's config
-  --claude-disable-web-search   also add "WebSearch" to permissions.deny in Claude
-                                Code's settings.json
-  --muse-disable-web-search     also set tools.web_search.mode = "off" in Muse's
-                                settings.json (turns off Muse's own web search
-                                and web fetch)
-  --grok-disable-web-search     also set disable_web_search = true in Grok Build's
-                                config.toml (its own web search and fetch; X
-                                search stays)
+  --codex-disable-web-search    also switch Codex's default web search and fetch to
+                                Telem (sets web_search = "disabled" in its config)
+  --claude-disable-web-search   also switch Claude Code's default web search and
+                                fetch to Telem (adds "WebSearch" and "WebFetch" to
+                                permissions.deny in its settings.json)
+  --muse-disable-web-search     also switch Muse's default web search and fetch to
+                                Telem (sets tools.web_search.mode = "off" in its
+                                settings.json)
+  --grok-disable-web-search     also switch Grok Build's default web search and
+                                fetch to Telem (sets disable_web_search = true in
+                                its config.toml; X search stays)
   --grok-allow-telem            also let Grok Build run telem_search and telem_fetch
                                 without asking each time (a [permission] allow rule)
   --no-codex-reasoning          skip the Codex telem plugin (reasoning hook AND

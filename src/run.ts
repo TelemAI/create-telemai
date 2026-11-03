@@ -33,9 +33,9 @@ import {
   CLAUDE_USER_CONFIG_KEY,
   claudeConfigDir,
   claudePluginConfigPath,
-  claudeWebSearchDenied,
+  claudeWebRulesMissing,
   planClaudePluginConfig,
-  planClaudeWebSearchDeny,
+  planClaudeWebDeny,
   type ClaudePluginConfigEdit,
 } from "./claude.ts"
 import { mergeTelemConfig } from "./configfile.ts"
@@ -1044,12 +1044,14 @@ async function planClaudeCode(
   // a cancelled run leaves it unwritten. Only staged when a key is configured; a
   // keyless run still installs the plugin (it just cannot authenticate yet).
   //
-  // The same file carries the second, consent-gated edit: "WebSearch" in
-  // permissions.deny, so Claude Code's own web search is off and its searches go
-  // through Telem (owner design, 2026-10-26; Codex's web_search step, below, is the
-  // model). Asked only here, once the plugin is going in — turning the built-in off
-  // without Telem installed would leave Claude Code with no web search at all — and
-  // skipped when the rule is already there: a Yes that changes nothing is noise.
+  // The same file carries the second, consent-gated edit: "WebSearch" and "WebFetch"
+  // in permissions.deny, which switches Claude Code's default web search and fetch to
+  // Telem (owner design, 2026-10-26; WebFetch and the "switch the default" wording,
+  // owner 2026-11-03; Codex's web_search step, below, is the model). Asked only here,
+  // once the plugin is going in — denying the built-ins without Telem installed would
+  // leave Claude Code with no web search at all — and skipped when both rules are
+  // already there: a Yes that changes nothing is noise. A file that has only one (an
+  // install from before WebFetch was added) is asked about the other.
   const configPath = claudePluginConfigPath(claudeConfigDir(ports.env, home))
   const source = ports.readText(configPath)
   let contents = source
@@ -1072,17 +1074,19 @@ async function planClaudeCode(
     const keyed = planClaudePluginConfig(contents, apiKey, configPath)
     if (!stage(keyed, `store TELEM_API_KEY in the ${CLAUDE_PLUGIN_REF} plugin's userConfig`, `remove the "${CLAUDE_PLUGIN_REF}" entry`)) return
   }
-  const denyWebSearch = claudeWebSearchDenied(source)
+  const missingWebRules = claudeWebRulesMissing(source)
+  const webRules = missingWebRules.map((rule) => `"${rule}"`).join(" and ")
+  const switchWeb = !missingWebRules.length
     ? false
     : ui
       ? await ui.confirm({
-          message: `Send Claude Code's web searches through Telem? (adds "WebSearch" to permissions.deny in ${abbreviateHome(configPath, home)})`,
+          message: `Switch Claude Code's default web search and fetch to Telem? (adds ${webRules} to permissions.deny in ${abbreviateHome(configPath, home)})`,
           initialValue: true,
         })
       : flags.claudeDisableWebSearch
-  if (denyWebSearch) {
-    const denied = planClaudeWebSearchDeny(contents, configPath)
-    if (!stage(denied, `add "WebSearch" to permissions.deny so Claude Code searches through Telem`, `remove "WebSearch" from permissions.deny`)) return
+  if (switchWeb) {
+    const denied = planClaudeWebDeny(contents, configPath)
+    if (!stage(denied, `add ${webRules} to permissions.deny so Claude Code's default web search and fetch is Telem`, `remove ${webRules} from permissions.deny`)) return
   }
   if (contents !== source && contents !== null) {
     addFile(plan, {
@@ -1184,7 +1188,7 @@ async function planMuse(
     ? false
     : ui
       ? await ui.confirm({
-          message: `Send Muse's web searches through Telem? (sets tools.web_search.mode = "off" in ${abbreviateHome(settingsPath, home)})`,
+          message: `Switch Muse's default web search and fetch to Telem? (sets tools.web_search.mode = "off" in ${abbreviateHome(settingsPath, home)})`,
           initialValue: true,
         })
       : flags.museDisableWebSearch
@@ -1556,7 +1560,8 @@ async function planCodex(
   const codexHome = codexHomeDir(ports.env, home)
   const configPath = join(codexHome, "config.toml")
   const source = ports.readText(configPath)
-  // Lead with the OUTCOME (Codex searching through Telem), name the TOML edit as the
+  // Lead with the OUTCOME (Telem as Codex's default web search and fetch; "switch the
+  // default", not "disable", is the owner's wording, 2026-11-03), name the TOML edit as the
   // parenthetical, and default to Yes: an installer whose enter-presser finishes with
   // Codex still preferring its own built-in search has installed the product unused.
   // The question is skipped entirely when config.toml already reads
@@ -1567,7 +1572,7 @@ async function planCodex(
     : ui
       ? await ui.confirm({
           message:
-            'Send Codex\'s web searches through Telem? (sets web_search = "disabled" in ~/.codex/config.toml)',
+            'Switch Codex\'s default web search and fetch to Telem? (sets web_search = "disabled" in ~/.codex/config.toml)',
           initialValue: true,
         })
       : flags.codexDisableWebSearch
@@ -1813,7 +1818,7 @@ async function planGrok(
     ? false
     : ui
       ? await ui.confirm({
-          message: `Send Grok Build's web searches through Telem? (sets disable_web_search = true in ${shown})`,
+          message: `Switch Grok Build's default web search and fetch to Telem? (sets disable_web_search = true in ${shown})`,
           initialValue: true,
         })
       : flags.grokDisableWebSearch

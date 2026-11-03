@@ -79,16 +79,18 @@ export function readClaudePluginConfig(source: string | null): ClaudePluginConfi
 const isObj = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === "object" && !Array.isArray(v)
 
-/** The permission rule that turns off Claude Code's built-in web search tool. */
-export const CLAUDE_WEB_SEARCH_RULE = "WebSearch"
+/** The permission rules that switch Claude Code's default web search and fetch to Telem:
+ * its built-in `WebSearch` and `WebFetch` tools, so searches go to telem_search and page
+ * reads to telem_fetch. */
+export const CLAUDE_WEB_RULES: readonly string[] = ["WebSearch", "WebFetch"]
 
-/** True when settings.json already denies Claude Code's built-in `WebSearch`. */
-export function claudeWebSearchDenied(source: string | null): boolean {
+/** The rules of CLAUDE_WEB_RULES that settings.json does not deny yet, in that order (all
+ * of them for a missing or unreadable file). Empty: the switch is already made. */
+export function claudeWebRulesMissing(source: string | null): string[] {
   const file = readClaudePluginConfig(source)
-  if (file.status !== "parsed") return false
-  const permissions = file.value.permissions
+  const permissions = file.status === "parsed" ? file.value.permissions : undefined
   const deny = isObj(permissions) ? permissions.deny : undefined
-  return Array.isArray(deny) && deny.includes(CLAUDE_WEB_SEARCH_RULE)
+  return CLAUDE_WEB_RULES.filter((rule) => !(Array.isArray(deny) && deny.includes(rule)))
 }
 
 export type ClaudePluginConfigEdit =
@@ -125,14 +127,15 @@ export function planClaudePluginConfig(source: string | null, apiKey: string, pa
 }
 
 /**
- * Add `"WebSearch"` to `permissions.deny`, so Claude Code's own web search is off and
- * its searches go through Telem (owner design, 2026-10-26; the same step Codex has for
+ * Add `"WebSearch"` and `"WebFetch"` to `permissions.deny`, so Claude Code's default web
+ * search and fetch is Telem (owner design, 2026-10-26; WebFetch and the "switch the
+ * default" wording, owner 2026-11-03; the same step Codex has for
  * `web_search = "disabled"`). Only with the user's consent, never as a side effect of
- * installing. Every other key and every existing permission rule is PRESERVED, and the
- * rule is added only when it is absent. A plugin cannot ship this rule itself: Claude
+ * installing. Every other key and every existing permission rule is PRESERVED, and only
+ * the rules that are absent are added. A plugin cannot ship these rules itself: Claude
  * Code keeps only `agent` and `subagentStatusLine` from a plugin's settings.
  */
-export function planClaudeWebSearchDeny(source: string | null, path: string): ClaudePluginConfigEdit {
+export function planClaudeWebDeny(source: string | null, path: string): ClaudePluginConfigEdit {
   const existing = readClaudePluginConfig(source)
   if (existing.status === "unparseable") {
     return {
@@ -140,7 +143,8 @@ export function planClaudeWebSearchDeny(source: string | null, path: string): Cl
       reason: `${path} is not valid JSON and will not be overwritten; fix or remove it, then re-run`,
     }
   }
-  if (claudeWebSearchDenied(source)) return { status: "unchanged" }
+  const missing = claudeWebRulesMissing(source)
+  if (!missing.length) return { status: "unchanged" }
   const base: Record<string, unknown> = existing.status === "parsed" ? { ...existing.value } : {}
   const permissions = isObj(base.permissions) ? { ...base.permissions } : {}
   if (permissions.deny !== undefined && !Array.isArray(permissions.deny)) {
@@ -150,6 +154,6 @@ export function planClaudeWebSearchDeny(source: string | null, path: string): Cl
     }
   }
   const deny = Array.isArray(permissions.deny) ? [...permissions.deny] : []
-  const out = { ...base, permissions: { ...permissions, deny: [...deny, CLAUDE_WEB_SEARCH_RULE] } }
+  const out = { ...base, permissions: { ...permissions, deny: [...deny, ...missing] } }
   return { status: "write", created: source === null, contents: `${JSON.stringify(out, null, 2)}\n` }
 }
