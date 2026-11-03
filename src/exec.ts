@@ -25,7 +25,7 @@
 // surface is reported "failed" instead of a PRE-COMMIT probe (e.g. `claude mcp
 // list`) unwinding `drive` and aborting the whole run with nothing written.
 
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 
 import { whichSync } from "./detect.ts"
 import type { Env, ExecResult } from "./detect.ts"
@@ -128,4 +128,38 @@ export function exec(
   // failure): spawn directly. Node's own argv encoder quotes spaces safely and no
   // cmd.exe metacharacter layer is in play.
   return safeSpawn(resolved, args)
+}
+
+/**
+ * The command that opens `url` in the default browser on `platform`. The URL is ONE
+ * argument and no shell ever sees it. `rundll32` is a real `.exe`, so on win32 it is
+ * spawned directly and the cmd.exe quoting above is never involved.
+ */
+export function openUrlArgv(platform: string, url: string): string[] {
+  if (platform === "darwin") return ["open", url]
+  if (platform === "win32") return ["rundll32", "url.dll,FileProtocolHandler", url]
+  return ["xdg-open", url]
+}
+
+/**
+ * Start `argv` and do not wait for it. Never throws.
+ *
+ * This is NOT `exec`: `exec` waits for the program to exit, and `xdg-open` can run the
+ * browser in the foreground (a browser that was not already running), which would
+ * block the installer until the user closes the browser. So the program is detached,
+ * its output is ignored, and the run does not wait for it. A failure to start it (no
+ * `xdg-open` on a server, for example) is ignored: the caller prints the URL anyway.
+ */
+export function openUrl(argv: string[]): void {
+  const [command, ...args] = argv
+  if (command === undefined) return
+  try {
+    const child = spawn(command, args, { detached: true, stdio: "ignore", shell: false, windowsHide: true })
+    // A missing program is reported as an `error` EVENT after spawn returns. With no
+    // listener, that event is an uncaught exception that ends the whole run.
+    child.on("error", () => {})
+    child.unref()
+  } catch {
+    // A synchronous spawn failure: ignored for the same reason.
+  }
 }

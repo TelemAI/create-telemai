@@ -229,8 +229,6 @@ export function missingRequiredFlags(flags: Flags, env: Record<string, string | 
  */
 export function ignoredInteractiveFlags(flags: Flags): string[] {
   const ignored: string[] = []
-  if (flags.clients.length) ignored.push("--client (the wizard asks which surfaces)")
-  if (flags.project) ignored.push("--project (the wizard asks about the project config)")
   if (flags.codexDisableWebSearch) ignored.push("--codex-disable-web-search (the wizard asks)")
   if (flags.claudeDisableWebSearch) ignored.push("--claude-disable-web-search (the wizard asks)")
   if (flags.museDisableWebSearch) ignored.push("--muse-disable-web-search (the wizard asks)")
@@ -263,15 +261,14 @@ Flags (they double as the non-interactive API):
                                 ${SURFACE_IDS.slice(0, 4).join(", ")},
                                 ${SURFACE_IDS.slice(4, 9).join(", ")},
                                 ${SURFACE_IDS.slice(9).join(", ")}
-  --login                       credentials only: verify a key, write it, exit
+  --login                       use a new key even if one is saved: verify it, save
+                                it, and give it to every tool this run sets up
   --base-url <url>              Telem deployment to configure and verify against
   --key-env <VAR>               read the API key from this environment variable
                                 instead of prompting (the CI path)
   --auto-routing <mode>         let Telem choose the providers for each search:
                                 ${AUTO_ROUTING_CHOICES.join(" | ")}. On (accuracy) by
                                 default; "off" turns it off and is kept on later runs.
-                                The wizard asks this as a step of its own; this flag
-                                answers it and skips it.
                                 accuracy is available now; latency and search_cost
                                 routing are coming shortly
   --project                     also write <cwd>/.telem/telem.json

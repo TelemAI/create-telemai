@@ -13,7 +13,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { codexPluginContentHash } from "./codex-plugin.ts"
-import { exec } from "./exec.ts"
+import { exec, openUrl } from "./exec.ts"
 import { existsSync, readTextSync } from "./fsops.ts"
 import { run } from "./run.ts"
 import { loadClackUi } from "./ui.ts"
@@ -98,6 +98,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     readText: readTextSync,
     exists: existsSync,
     exec,
+    openUrl,
     fetchImpl: (input, init) => fetch(input, init),
     loadUi: loadClackUi,
     claudePluginDir: resolveClaudePluginDir(),

@@ -36,6 +36,13 @@ export type Credentials = { apiKey?: string; baseUrl?: string }
 export type VerifyResult =
   | { status: "ok" }
   | { status: "unauthorized"; detail: string }
+  // 402: the KEY authenticated, but the account cannot pay (out of credits, a spend
+  // limit, a suspended subscription). The key is good, so it is kept and the user is
+  // told what to fix; replacing it would change nothing (owner, 2026-11-03).
+  | { status: "cannot_pay"; detail: string }
+  // 403: the key is known but refused (a blocked account, or a key without Telem
+  // Search). Told apart from a dead key by the STATUS CODE only, never by its text.
+  | { status: "refused"; detail: string }
   // The server is transiently unhappy (busy, overloaded, a bad gateway) — this says
   // nothing about the KEY, so it is treated like a network failure: offer to write
   // the key unverified, never a hard block.
@@ -77,8 +84,18 @@ export async function verifyKey(input: VerifyInput): Promise<VerifyResult> {
     if (response.status === 422 || response.status === 400 || (response.status >= 200 && response.status < 300)) {
       return { status: "ok" }
     }
-    if (response.status === 401 || response.status === 403) {
-      return { status: "unauthorized", detail: `${input.baseUrl} rejected the key (HTTP ${response.status})` }
+    if (response.status === 401) {
+      return { status: "unauthorized", detail: withRouterText(`${input.baseUrl} rejected the key (HTTP 401)`, await routerText(response)) }
+    }
+    if (response.status === 402) {
+      return {
+        status: "cannot_pay",
+        detail: withRouterText("the key works, but the account can't pay for searches (HTTP 402)", await routerText(response)) +
+          `. Add funds at ${CONSOLE_URL}`,
+      }
+    }
+    if (response.status === 403) {
+      return { status: "refused", detail: withRouterText(`${input.baseUrl} refused the key (HTTP 403)`, await routerText(response)) }
     }
     if (TRANSIENT_STATUSES.has(response.status)) {
       return {
@@ -93,6 +110,31 @@ export async function verifyKey(input: VerifyInput): Promise<VerifyResult> {
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * The router's own one-line reason from an error body, shown to the user as it is:
+ * FastAPI's `{"detail": "…"}`, the typed `{"error": {"message": "…"}}`, or nothing.
+ * It is only ever DISPLAYED — no branch reads it (status codes decide; never string-
+ * match messages). Capped and flattened so a large or odd body cannot flood the screen.
+ */
+async function routerText(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as unknown
+    const record = (body && typeof body === "object" ? body : {}) as Record<string, unknown>
+    const error = record.error as Record<string, unknown> | undefined
+    const text =
+      typeof record.detail === "string" ? record.detail : typeof error?.message === "string" ? error.message : null
+    if (!text) return null
+    const flat = text.replace(/\s+/g, " ").trim()
+    return flat.length > 200 ? `${flat.slice(0, 199)}…` : flat || null
+  } catch {
+    return null
+  }
+}
+
+function withRouterText(base: string, text: string | null): string {
+  return text ? `${base}: ${text}` : base
 }
 
 /**

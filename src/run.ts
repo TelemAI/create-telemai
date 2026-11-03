@@ -147,24 +147,12 @@ import {
   pythonInstaller,
   uvInstallCommand,
 } from "./detect.ts"
+import { openUrlArgv } from "./exec.ts"
 import type { InstallErrorContext } from "./errors.ts"
 import { failureLine, translateInstallError } from "./errors.ts"
 import type { Flags } from "./flags.ts"
 import { HELP_TEXT, ignoredInteractiveFlags, missingRequiredFlags, parseFlags } from "./flags.ts"
-import type { Question } from "./interview.ts"
-import {
-  AUTO_ROUTING_LABELS,
-  DEFAULT_PROVIDER_PICKS,
-  DEFAULT_TIER,
-  OFF_VALUE,
-  SEARCH_PROVIDERS,
-  SUGGESTIONS,
-  TIER_LABELS,
-  WIZARD_KEYS,
-  answerToValue,
-  buildInterview,
-  initialText,
-} from "./interview.ts"
+import { SUGGESTIONS } from "./interview.ts"
 import { findLegacyFiles, legacyWarnings } from "./legacy.ts"
 import { pickOpencodeConfigPath, planOpencodePlugin } from "./opencode.ts"
 import type { FileRemoval, FileWrite, Plan, PlannedCommand, SurfaceOutcome, SurfaceStatus } from "./plan.ts"
@@ -208,6 +196,12 @@ export type Ports = {
   readText: (path: string) => string | null
   exists: (path: string) => boolean
   exec: (argv: string[]) => ExecResult
+  /**
+   * Start a program and do not wait for it (`openUrl` in exec.ts). Used once: to open
+   * the Telem console in the browser when the user chooses to create a new key. It
+   * never throws, and a failure is ignored, because the URL is printed as well.
+   */
+  openUrl: (argv: string[]) => void
   fetchImpl: typeof fetch
   loadUi: () => Promise<Ui>
   /**
@@ -478,11 +472,24 @@ async function drive(
   const userPath = userConfigPath(ports.env, project?.root).path
 
   // ---- surfaces -----------------------------------------------------------
-  const selected: SurfaceId[] = flags.login
-    ? []
-    : interactive
-      ? await chooseSurfaces(ui as Ui, detected, plan)
-      : flags.clients
+  // Owner, 2026-11-03: the user should not have to answer what the installer can work
+  // out. So `--client` is honoured at a terminal too (it names the tools; asking again
+  // overruled it), and a machine with exactly ONE agent host skips the picker and says
+  // what it is doing. `--login` plans the surfaces like any run: its new key has to
+  // reach every app, not only credentials.json (the old advice "run --login" left the
+  // Claude Code plugin on its old key).
+  const detectedAgentHosts = SURFACES.filter((surface) => surface.probe !== null && detected.includes(surface.id))
+  // At a terminal `--login` asks no picker either: it gives the new key to the agent
+  // hosts on this machine, the same set the picker would pre-check.
+  const selected: SurfaceId[] = !interactive
+    ? flags.clients
+    : flags.clients.length
+      ? flags.clients
+      : flags.login
+        ? loginHosts(detectedAgentHosts, say)
+        : detectedAgentHosts.length === 1
+          ? onlyHost(detectedAgentHosts[0] as Surface, say)
+          : await chooseSurfaces(ui as Ui, detected, plan)
 
   // ---- credentials --------------------------------------------------------
   const existingCredentials = parseCredentials(ports.readText(credsPath))
@@ -548,41 +555,35 @@ async function drive(
     }
   }
 
-  if (flags.login) {
-    return finish(ports, flags, plan, {
-      say,
-      ui,
-      baseUrl,
-      credential,
-      // The key already on disk is scanned too: --login is exactly the rotation
-      // path, where the SUPERSEDED key is still live and still a secret to guard.
-      existingApiKey: existingCredentials.apiKey,
-      credsPath,
-      interactive,
-      verifyAgain: true,
-      progress,
-    })
-  }
-
-  // ---- options interview --------------------------------------------------
+  // ---- search options ------------------------------------------------------
+  // No questions (owner, 2026-11-03: "we handle everything for client"). This used
+  // to be an interview: "Customize search defaults?" and the auto-routing step. Both
+  // defaults are what pressing Enter gave — Telem's recommended options, and
+  // auto-routing on — so that is what every run now writes. Power users keep
+  // `--auto-routing` and the files. A value the user already set is never changed.
+  // (Reverses the generated interview of spec 2026-08-11 and the "asks this as a
+  // step of its own" auto-routing design, on the owner's 2026-11-03 rule.
   const existingUser = safeJson(ports.readText(userPath))
-  const answers: Record<string, unknown> = interactive
-    ? await askOptions(ui as Ui, (existingUser ?? {}) as Record<string, unknown>, flags.autoRouting)
-    : {}
+  const answers: Record<string, unknown> = {}
   // The flag is the non-interactive API for the same screen, so it works with --yes
   // AND overrides the wizard when both spoke: it is the more explicit instruction.
   // "off" is WRITTEN, not removed: a missing key means "never asked", and only an
   // explicit "off" survives the next run's default.
   // The installer's default is routing on; a value already in the user file (a mode
   // or "off") is the user's earlier answer and is kept. See the project merge below.
-  const routingDefaulted = flags.autoRouting === undefined && !interactive
+  // `--login` is about the key: it writes no option, not even this default.
+  const routingDefaulted = flags.autoRouting === undefined && !flags.login
   if (flags.autoRouting !== undefined) {
     answers.autoRouting = flags.autoRouting
   } else if (routingDefaulted && !hasAutoRouting(existingUser)) {
     answers.autoRouting = SUGGESTIONS.autoRouting?.[0]
   }
 
-  const userMerge = mergeTelemConfig(ports.readText(userPath), answers, userPath)
+  // `--login` leaves the options file exactly as it is (it used to stop before this
+  // point; it now goes on to the surfaces, so the new key reaches every app).
+  const userMerge: ReturnType<typeof mergeTelemConfig> = flags.login
+    ? { status: "unchanged", reason: "--login writes no option" }
+    : mergeTelemConfig(ports.readText(userPath), answers, userPath)
   if (userMerge.status === "abort") {
     ports.stderr(`error: ${userMerge.reason}`)
     ports.stderr("Nothing was written.")
@@ -616,15 +617,9 @@ async function drive(
     ),
   )
 
-  const wantProject = flags.login
-    ? false
-    : interactive
-      ? project !== null &&
-        (await (ui as Ui).confirm({
-          message: `Also write a project config in ${project.root}/.telem/telem.json? (${project.marker} is here — commit it and the team inherits it)`,
-          initialValue: false,
-        }))
-      : flags.project
+  // A project file only when asked for with `--project` (no longer a question: the
+  // user file already holds everything a first run needs).
+  const wantProject = flags.login ? false : flags.project
   if (wantProject) {
     const root = project?.root ?? ports.cwd
     const projectPath = join(root, ".telem", "telem.json")
@@ -715,6 +710,21 @@ async function drive(
  * no probe of its own (the copy-paste MCP snippet) is neither tagged — there is no
  * host for it to be missing — nor pre-checked, since it only prints something.
  */
+/**
+ * Exactly one agent host on this machine: use it without asking, and say so — with the
+ * way to add another, since a GUI app that is not on PATH is not detected.
+ */
+function onlyHost(surface: Surface, say: (line: string) => void): SurfaceId[] {
+  say(`Installing into ${appName(surface.label)}. To add other tools: npx @telemai/create --client <name>`)
+  return [surface.id]
+}
+
+/** `--login` at a terminal: the new key goes to every agent host on this machine. */
+function loginHosts(hosts: Surface[], say: (line: string) => void): SurfaceId[] {
+  if (hosts.length) say(`Giving the new key to: ${hosts.map((surface) => appName(surface.label)).join(", ")}`)
+  return hosts.map((surface) => surface.id)
+}
+
 async function chooseSurfaces(ui: Ui, detected: string[], plan: Plan): Promise<SurfaceId[]> {
   const missingHost = (surface: Surface) => surface.probe !== null && !detected.includes(surface.id)
   const options: Record<string, { value: string; label: string; hint?: string }[]> = {}
@@ -1015,7 +1025,7 @@ async function planClaudeCode(
   // hand and never told the key was missing from the config those commands read.
   if (!apiKey) {
     plan.warnings.push(
-      "the telem Claude plugin has no key yet; add one with `npx @telemai/create --login` (it prompts) and re-run",
+      "the telem Claude plugin has no key yet; add one with `npx @telemai/create --login`",
     )
   }
 
@@ -1822,8 +1832,9 @@ async function planGrok(
           initialValue: true,
         })
       : flags.grokDisableWebSearch
-  // Grok asks before every MCP call. Codex and Claude Code run the Telem tools without
-  // asking, so the default is Yes; skipped when the file already allows both.
+  // Grok asks before every MCP call, so the default is Yes; skipped when the file
+  // already allows both. (Whether Claude Code asks before each Telem call in its
+  // default mode is not yet checked live; it gets no allow rule today.
   const allowTelem = grokTelemAllowed(source)
     ? false
     : ui
@@ -2490,6 +2501,34 @@ function claudePluginConfigApplies(ports: Ports, tools: Record<string, ToolInfo>
   return Boolean(pluginDir && ports.exists(pluginDir))
 }
 
+/** Shown when the server refuses the key already on disk (401), before the key choice. */
+const SAVED_KEY_REFUSED = "Your saved Telem key no longer works (the server refused it)."
+
+/**
+ * The key choice (owner, 2026-11-03: "since we are key-centric, we need an extra msg
+ * allow user to choose a new key or pasting an existing key"). It is shown whenever
+ * the run has no usable key: none saved, the saved key got a 401, or `--login`. Paste
+ * is the default. A retry after a refused paste skips it and goes straight back to
+ * the paste prompt.
+ */
+const KEY_CHOICE = {
+  message: "Telem API key",
+  options: [
+    { value: "paste", label: "Paste an existing key", hint: "a key you already have" },
+    {
+      value: "create",
+      label: "Create a new key in the Telem console",
+      hint: "opens the Telem console; a new key starts with no sessions or monitors",
+    },
+  ],
+  initialValue: "paste",
+}
+
+/** Shown on "create", just before the browser is opened. The URL is a constant, never input. */
+const CREATE_KEY_NOTE =
+  `Opening ${CONSOLE_URL} — open your project, then API keys, then Issue API key. Paste the new key here. ` +
+  "A new key starts with no searches, sessions or monitors of its own."
+
 type CredentialOutcome = {
   apiKey?: string
   status: string
@@ -2519,17 +2558,23 @@ async function verifyWithSpinner(
   const spin = ui?.spinner()
   spin?.start(`Checking your key against ${baseUrl}…`)
   const verified = await verifyKey({ baseUrl, apiKey, fetchImpl: ports.fetchImpl })
-  spin?.stop(verified.status === "ok" ? "Key accepted" : "Key not confirmed")
+  spin?.stop(
+    verified.status === "ok"
+      ? "Key accepted"
+      : verified.status === "cannot_pay"
+        ? "Key accepted, but the account can't pay"
+        : "Key not confirmed",
+  )
   return verified
 }
 
 /**
- * Verify the key ALREADY in credentials.json, for the interactive "use it?" path.
+ * Verify the key ALREADY in credentials.json, for the interactive run.
  *
  * Returns the outcome when the run should proceed on that key, or `null` when the
- * caller should fall through to the paste prompt. Nothing is staged either way: the
- * key is already on disk, so "keep it" is a no-op write, and `kept` is exactly the
- * status the flags path uses for the same situation.
+ * server refused it (401) and the caller should offer the paste-or-create choice.
+ * Nothing is staged either way: the key is already on disk, so "keep it" is a no-op
+ * write, and `kept` is exactly the status the flags path uses for the same situation.
  */
 async function checkExistingKey(
   ports: Ports,
@@ -2539,20 +2584,29 @@ async function checkExistingKey(
   const apiKey = context.existing.apiKey as string
   const verified = await verifyWithSpinner(ports, ui, context.baseUrl, apiKey)
   if (verified.status === "ok") {
-    context.say(`key verified against ${context.baseUrl}`)
+    context.say(`Using your saved Telem key (${maskKey(apiKey)}). To use a different key: npx @telemai/create --login`)
+    return { status: "kept" }
+  }
+  if (verified.status === "cannot_pay" || verified.status === "refused") {
+    // The key is known to the server, so it is the user's key and it stays. What
+    // needs them is the account (402) or the key's rights (403); say which, with the
+    // router's own words, and never replace or drop the key over it.
+    ui.warn(verified.detail)
+    context.plan.warnings.push(
+      verified.status === "cannot_pay"
+        ? verified.detail
+        : `${verified.detail} — the key was kept. If it has no Telem Search, create one that does at ${CONSOLE_URL} and run npx @telemai/create --login`,
+    )
     return { status: "kept" }
   }
   if (verified.status === "unauthorized") {
-    // The stored key is dead (revoked, or the deployment changed under it). Offer
-    // the paste prompt rather than proceeding on a key the server just refused.
+    // The stored key is dead (revoked, or the deployment changed under it). Say so in
+    // plain words, then the caller offers the same paste-or-create choice as a run with
+    // no key (owner, 2026-11-03). An empty paste there ends keyless with the
+    // rejected-key warning (`existingRefused`): the refused key is never kept.
     ui.error(verified.detail)
-    const retry = await ui.confirm({ message: "Try a different key?", initialValue: true })
-    if (retry) return null
-    // Same rule as the paste prompt: a run that ends without a usable key SAYS so.
-    // Declining the retry leaves the key on disk, but the deployment just refused it,
-    // so "there is already a key configured" would be exactly the wrong reading.
-    context.plan.warnings.push(NO_KEY_SAVED.rejectedExisting)
-    return { status: "rejected" }
+    ui.warn(SAVED_KEY_REFUSED)
+    return null
   }
   // Unreachable / transient / unexpected says nothing about the key, and there is no
   // write to consent to — the key is already where it lives. Keep it, and say why the
@@ -2574,12 +2628,14 @@ async function resolveCredential(
     /** Every file this run will put the key in — see `keyTargetFiles`. */
     keyFiles: { path: string; why: string }[]
     /**
-     * Set ONLY on the call made by "Try a different key? → Yes".
+     * Set ONLY on the call made by "Try a different key? → Yes" (after a pasted key
+     * got a 401 or 403).
      *
      * That answer used to restart this function from the top, which re-asked "Found an
      * existing Telem key — use it?" — offering back a key the user had just declined or
      * the server had just refused — and re-printed the whole where-your-key-goes block
-     * the user had read seconds earlier. A retry means one thing: paste another key.
+     * the user had read seconds earlier. A retry means one thing: paste another key, so
+     * it also skips the paste-or-create choice.
      */
     retry?: boolean
     /**
@@ -2617,18 +2673,16 @@ async function resolveCredential(
     //
     // `--login` is exempt: its whole job is to add or replace a key, so offering to
     // keep the one already on disk answers a question the user just overruled.
+    //
+    // Owner, 2026-11-03: "if they already have a valid key, we should not question them
+    // for anyting". So the saved key is checked and used with no question; the line
+    // that says so also names `--login`, the way to use another key.
     if (context.existing.apiKey && !flags.login && !context.retry) {
-      const useExisting = await ui.confirm({
-        message: `Found an existing Telem key (${maskKey(context.existing.apiKey)}) — use it?`,
-        initialValue: true,
-      })
-      if (useExisting) {
-        const kept = await checkExistingKey(ports, ui, context)
-        if (kept) return kept
-        // checkExistingKey falls through ONLY when the server refused the on-disk key
-        // and the user chose to paste another — remember that for the empty-paste rule.
-        context = { ...context, existingRefused: true }
-      }
+      const kept = await checkExistingKey(ports, ui, context)
+      if (kept) return kept
+      // checkExistingKey falls through ONLY when the server refused the on-disk key
+      // (401). The key choice follows; remember the refusal for the empty-paste rule.
+      context = { ...context, existingRefused: true }
     }
     // The note names every file the key lands in, because "written only to
     // credentials.json" was false the moment Codex and the Claude plugin needed it
@@ -2641,7 +2695,6 @@ async function resolveCredential(
     // Every path is abbreviated the way every other human line in this installer is
     // (`say` does it, the summary does it): three raw 40-character $HOME prefixes stack
     // up in the one note the user is meant to read carefully before pasting a secret.
-    const home = ports.env.HOME ?? ports.env.USERPROFILE ?? ""
     const targets = context.keyFiles
     if (context.retry) {
       ui.note(
@@ -2650,21 +2703,34 @@ async function resolveCredential(
         "API key",
       )
     } else {
+      // Two lines (owner, 2026-11-03: keep it simple). Which files hold the key is in
+      // the summary's "Wrote" list, path by path; the note says where and who can read it.
       ui.note(
-        abbreviateHome(
-          `Sign in at ${CONSOLE_URL}, open your project, and create a key under "API keys".\n` +
-            "Paste it below — it is masked, never printed, and never put on a command line.\n" +
-            `This run writes it to ${targets.length === 1 ? "one file" : `${targets.length} files`}, ` +
-            `all 0600:\n` +
-            targets.map((target) => `  ${target.path}\n    ${target.why}`).join("\n") +
-            "\nLeave it empty if you do not have one yet; everything else still gets configured." +
-            "\nUsing a different Telem endpoint? re-run with --base-url <url>.",
-          home,
-        ),
+        `Create a key at ${CONSOLE_URL} (your project, then "API keys") and paste it below.\n` +
+          `It stays hidden, and it is saved only on this computer, readable only by you (${
+            targets.length === 1 ? "one file" : `${targets.length} files`
+          }, listed at the end). Leave it empty to skip.`,
         "API key",
       )
     }
-    const pasted = (await ui.password({ message: "Telem API key (empty to skip)" })).trim()
+    // Paste an existing key, or create a new one in the console first. A retry is one
+    // thing only (paste another key), so it skips the choice.
+    const choice = context.retry ? "paste" : await ui.select(KEY_CHOICE)
+    if (choice === "create") {
+      ui.note(CREATE_KEY_NOTE, "API key")
+      // One argument per element, no shell, and the URL is our own constant. A failure
+      // to open is ignored: the note above prints the URL.
+      try {
+        ports.openUrl(openUrlArgv(ports.platform, CONSOLE_URL))
+      } catch {
+        // ignored, see above
+      }
+    }
+    const pasted = (
+      await ui.password({
+        message: choice === "create" ? "Paste the new Telem API key (empty to skip)" : "Telem API key (empty to skip)",
+      })
+    ).trim()
     apiKey = pasted || undefined
   } else if (context.existing.apiKey) {
     return { status: "kept", apiKey: undefined }
@@ -2703,7 +2769,14 @@ async function resolveCredential(
     context.say(`key verified against ${context.baseUrl}`)
     return { status: "verified", apiKey }
   }
-  if (verified.status === "unauthorized") {
+  if (verified.status === "cannot_pay") {
+    // The key authenticated: it is GOOD, and it is written. The account is what needs
+    // fixing, and a new key would not change that.
+    if (ui) ui.warn(verified.detail)
+    context.plan.warnings.push(verified.detail)
+    return { status: "verified", apiKey }
+  }
+  if (verified.status === "unauthorized" || verified.status === "refused") {
     if (ui) {
       ui.error(verified.detail)
       const retry = await ui.confirm({ message: "Try a different key?", initialValue: true })
@@ -2972,9 +3045,11 @@ function readVerdict(options: {
   const { plan, credential, commandFailed, login, credsPath } = options
   const failed = commandFailed || plan.outcomes.some((outcome) => outcome.status === "failed")
 
-  if (login) {
-    // --login has exactly one job, so the outro IS the credential outcome — and a key
-    // the deployment rejected is a failed run, not a silent exit 0 under "Telem is set up."
+  if (login && (credential.status === "rejected" || plan.outcomes.length === 0)) {
+    // With no app to update, --login's one job is the key, so the outro IS the
+    // credential outcome — and a key the deployment rejected is a failed run, not a
+    // silent exit 0 under "Telem is set up." With apps, the normal verdict below says
+    // how each one went.
     return {
       exitCode: failed || credential.status === "rejected" ? EXIT_ERROR : EXIT_OK,
       outro: loginOutro(credential, credsPath),
@@ -3191,181 +3266,10 @@ function appName(label: string): string {
 
 // ---------------------------------------------------------------------------
 
-/**
- * The one wording for "you skipped this".
- *
- * The redesign removed every free-text option question, which is where a skipped
- * answer used to render as silence — but one screen can still be answered with
- * nothing: the provider multiselect, deselected down to empty. It gets the same
- * words, plus what that emptiness actually means, so the screen never looks like it
- * swallowed the answer.
- */
-const UNSET_LABEL = "leave unset"
-
-/**
- * The search defaults, behind ONE gate.
- *
- * The table defines more keys than the wizard asks about (`WIZARD_KEYS`): behind this
- * gate it asks three, and only when the user says yes, with `autoRouting` as a step of
- * its own. Six screens that every captured first run answered "leave unset" was six
- * screens of nothing; the refinements (`fields`, `providersExclude`,
- * `providerOverrides`) and the fetch keys (`fetchProviders`, `fetchTier`,
- * `fetchNoCache`) stay in `~/.telem/telem.json` where the people who want them live.
- *
- * Every answer still travels through the SHIPPED coercers via `answerToValue`, so a
- * value this screen accepts is a value every reader resolves.
- */
 /** Whether the existing user file already answered the auto-routing question. */
 function hasAutoRouting(existing: unknown): boolean {
   const value = (existing as Record<string, unknown> | null | undefined)?.autoRouting
   return typeof value === "string" && value.trim() !== ""
-}
-
-async function askOptions(
-  ui: Ui,
-  existing: Record<string, unknown>,
-  /** Set when `--auto-routing` already decided: that screen is skipped rather than
-   *  asked and then silently overridden. */
-  presetRouting?: string,
-): Promise<Record<string, unknown>> {
-  const questions = Object.fromEntries(
-    buildInterview(existing)
-      .filter((entry) => WIZARD_KEYS.includes(entry.key))
-      .map((entry) => [entry.key, entry]),
-  )
-  const answers: Record<string, unknown> = {}
-
-  const customize = await ui.confirm({
-    message: "Customize search defaults? (No = Telem's recommended defaults)",
-    initialValue: false,
-  })
-
-  // ---- autoRouting: a step of its own -------------------------------------
-  // Asked whatever the answer above, because it is not a "default" to tune — it
-  // decides whether Telem picks the providers at all, and it was invisible to every
-  // user who took the recommended defaults. It sits here, directly after that
-  // question, so its position does not depend on the answer.
-  const routingQuestion = questions.autoRouting as Question
-  const currentRouting = initialText(routingQuestion)
-  const routingModes = SUGGESTIONS.autoRouting ?? []
-  // A mode this installer cannot offer is still the user's setting: `latency` on a
-  // self-hosted deployment, or a value a newer version wrote. It stays a choice and
-  // the cursor starts on it, so Enter keeps it rather than deleting it.
-  const isOff = currentRouting.toLowerCase() === OFF_VALUE
-  const unofferable =
-    currentRouting && !isOff && !routingModes.includes(currentRouting) ? [currentRouting] : []
-  // The SHAPE follows the vocabulary: one mode to offer is a yes/no question, and
-  // anything richer — a second mode, or a configured one we cannot offer — needs a
-  // list. So this becomes a select on its own the day latency and search_cost land.
-  const asList = unofferable.length > 0 || routingModes.length > 1
-  let routing: string
-  if (presetRouting !== undefined) {
-    ui.info(`auto-routing: ${presetRouting} (from --auto-routing)`)
-    routing = presetRouting
-  } else if (asList) {
-    routing = await ui.select({
-      message: "Let Telem choose which providers run each search? (auto-routing)",
-      options: [
-        { value: OFF_VALUE, label: "Off — your configured providers run every search" },
-        ...routingModes.map((value) => ({ value, label: AUTO_ROUTING_LABELS[value] ?? value })),
-        ...unofferable.map((value) => ({ value, label: `${value} — your current setting, kept as it is` })),
-      ],
-      // Starts on routing unless the file already says off: on is the default.
-      initialValue: isOff
-        ? OFF_VALUE
-        : [...routingModes, ...unofferable].includes(currentRouting)
-          ? currentRouting
-          : (routingModes[0] ?? OFF_VALUE),
-    })
-  } else {
-    const enable = await ui.confirm({
-      message: "Let Telem choose which providers run each search? (auto-routing)",
-      // On is the default; only a file that already says "off" starts on No.
-      initialValue: !isOff,
-    })
-    routing = enable ? (routingModes[0] as string) : OFF_VALUE
-  }
-  if (routing === OFF_VALUE) {
-    // WRITTEN, not removed: a missing key means "never asked", and only an explicit
-    // "off" keeps the next run from offering routing as the default again.
-    answers.autoRouting = OFF_VALUE
-  } else if (unofferable.includes(routing)) {
-    // Their own value, kept verbatim. It deliberately bypasses `answerToValue`,
-    // whose suggestion gate rejects anything this installer does not offer — the
-    // KEY accepts it and it is already in their file, so keeping it must not depend
-    // on what this version happens to know about.
-    answers.autoRouting = routing
-  } else {
-    const routingAnswer = answerToValue(routingQuestion, routing)
-    answers.autoRouting = routingAnswer.ok ? routingAnswer.value : undefined
-  }
-
-  if (!customize) return answers
-  ui.note(
-    "Optional tuning for every Telem search — how much detail comes back, which providers run.\n" +
-      "Press Enter on each to keep Telem's defaults; you can change them later in ~/.telem/telem.json.",
-    "Search defaults",
-  )
-
-  // ---- tier ---------------------------------------------------------------
-  const tierQuestion = questions.tier as Question
-  const currentTier = initialText(tierQuestion)
-  const tier = await ui.select({
-    message: "How much detail should each search result include? (tier)",
-    options: (SUGGESTIONS.tier ?? []).map((value) => ({ value, label: TIER_LABELS[value] ?? value })),
-    initialValue: (SUGGESTIONS.tier ?? []).includes(currentTier) ? currentTier : DEFAULT_TIER,
-  })
-  const tierAnswer = answerToValue(tierQuestion, tier)
-  answers.tier = tierAnswer.ok ? tierAnswer.value : undefined
-
-  // ---- providers ----------------------------------------------------------
-  // One screen, not two. "Which to include" and "which to exclude" were the same
-  // decision asked twice, and the pair could contradict each other; the wizard now
-  // asks the decision — the deployment's set, or a set of your own — and
-  // `providersExclude` stays a file-only refinement.
-  const providersQuestion = questions.providersInclude as Question
-  const currentProviders = Array.isArray(providersQuestion.initial)
-    ? (providersQuestion.initial as string[])
-    : []
-  const providerMode = await ui.select({
-    message: "Which search providers should searches use?",
-    options: [
-      { value: "default", label: "Deployment default — recommended" },
-      { value: "choose", label: "Choose specific providers…" },
-    ],
-    initialValue: currentProviders.length ? "choose" : "default",
-  })
-  if (providerMode === "choose") {
-    ui.note("More providers = higher cost per search.", "Providers")
-    const picked = await ui.multiselect({
-      message: "Which providers should run?",
-      options: SEARCH_PROVIDERS.map((provider) => ({ value: provider, label: provider })),
-      initialValues: currentProviders.length ? currentProviders : [...DEFAULT_PROVIDER_PICKS],
-      required: false,
-    })
-    const result = answerToValue(providersQuestion, picked.join(","))
-    answers.providersInclude = result.ok ? result.value : undefined
-    // Deselected down to nothing IS an answer — the same answer as "Deployment
-    // default" — and it used to be the only screen in the interview that took an
-    // answer and echoed nothing back.
-    if (!picked.length) ui.info(`${UNSET_LABEL} — the deployment's own provider set will run`)
-  } else {
-    // The deployment's own set: that is the ABSENCE of providersInclude, so an
-    // include list left over from an earlier run is removed rather than kept.
-    answers.providersInclude = undefined
-  }
-
-  // ---- fullContent --------------------------------------------------------
-  // A confirm, not a tri-state select: "leave unset" and "no" resolve identically on
-  // every reader (off unless set), so offering both asked the user to distinguish
-  // two words for the same behavior.
-  const fullContent = await ui.confirm({
-    message: "Fetch full page content for every result? (slower, extra cost)",
-    initialValue: questions.fullContent?.initial === true,
-  })
-  answers.fullContent = fullContent ? true : undefined
-
-  return answers
 }
 
 function safeJson(source: string | null): unknown {

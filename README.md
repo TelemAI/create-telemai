@@ -20,7 +20,9 @@ OpenCode itself is a Bun binary.
 
 1. **Detects** which of `opencode`, `claude`, `codex`, `pi`, `openclaw`, `hermes`, and the
    Python toolchain (`python3`/`pip`/`uv`, `telem-mcp`) are on your PATH.
-2. **Asks which tools** to install into, grouped. Every tool in the catalog is
+2. **Picks the tools.** With exactly one agent host on this machine, it uses that one
+   and says so (add others with `--client`). `--client` names them at a terminal too.
+   Otherwise it asks which tools to install into, grouped. Every tool in the catalog is
    listed, always: the ones this machine has are pre-checked and sorted first, and
    the rest keep their place with a dimmed `(not detected on this machine)`. Space
    toggles one, the group header toggles a group, and deselecting everything is a
@@ -31,16 +33,25 @@ OpenCode itself is a Bun binary.
    `POST {baseUrl}/v1/search`. Auth is resolved ahead of body validation, so
    `422`/`400`/`2xx` mean the key is good and `401`/`403` mean it is bad —
    anything else, a 404 included, is reported as `unexpected` rather than as a
-   verdict on the key. (`/v1/me/*` is **not** used —
+   verdict on the key. Two answers keep the key and say what needs fixing instead:
+   `402` (the account can't pay: out of credits, a spend limit, a suspended
+   subscription) and `403` on a key already saved (the account or the key is refused).
+   The router's own reason is shown as it is; no decision reads it. (`/v1/me/*` is **not** used —
    those routes are OIDC/human-session only and reject every real `tlm_` key.)
-   A key already on disk is offered first: Yes re-verifies and keeps it, No falls
-   through to the paste prompt. No key yet, or the deployment unreachable? Both
-   are branches, not dead ends.
-4. **Offers the search defaults**, behind one `Customize search defaults?` gate
-   (default No). On Yes it asks three questions — the result `tier`, the providers
-   to run, and whether to fetch full page content — through the shared option
-   table's own coercers, so the wizard can never write a value the readers do not
-   resolve.
+   A key already on disk is checked and used with no question; to use another,
+   run with `--login`. When there is no usable key (none saved, the saved key gets a
+   `401`, or `--login`), it first asks how you want to add one: **Paste an existing
+   key** (the default) or **Create a new key in the Telem console**. Create opens
+   `https://app.telem.ai` in your browser (`open` on macOS, `xdg-open` on Linux,
+   `rundll32` on Windows; the URL is printed too, so a browser that does not open
+   stops nothing) and then asks you to paste the new key. A new key starts with no
+   searches, sessions or monitors of its own. Both ways, an empty paste skips the key.
+   A run from flags (`--yes`, CI, `--json`, or no terminal) asks nothing and opens
+   nothing. The deployment unreachable? That is a branch, not a dead end.
+4. **Writes Telem's recommended search defaults** with no questions: auto-routing on
+   (`autoRouting: "accuracy"`) unless `~/.telem/telem.json` already says otherwise.
+   Everything else stays at Telem's defaults. `--auto-routing`, `--project` and the
+   files below are there for anyone who wants to tune.
 5. **Installs each surface** (see the table below).
 6. **Summarizes** what was written, what ran, and how to undo every file it
    touched, then closes with the numbered **Next steps** (which apps to restart)
@@ -104,8 +115,8 @@ touches depends on the surfaces you install:
   `~/.config/devin/mcp_config.json` — *only* if you install Devin Desktop: the same
   header, for the same reason.
 
-The wizard names these files, by their real paths for your run, in the note it
-prints just before it asks for the key.
+The note before the key question says how many of these files your run writes,
+and the summary at the end names each one by its real path.
 
 ### Per-surface steps
 
@@ -136,12 +147,10 @@ manual step. `codex`, `claude-code`, `muse`, `vscode`, `cursor`, `devin` and `mc
 seven talk to the hosted MCP over https, so a run without the skill never offers
 the Python install.
 
-### Options the wizard does not ask about
+### Options you can set yourself
 
-`~/.telem/telem.json` supports ten keys. The wizard asks about four — `autoRouting`,
-`tier`, `providersInclude`, `fullContent` — and leaves the rest to the file. Three
-refine a search answer it already has, and asking a first-run user to type a JSON
-blob of raw per-provider parameters bought six screens of "leave unset":
+`~/.telem/telem.json` supports ten keys. The installer asks about none of them: it
+writes `autoRouting` (on) when the file has no value, and leaves the rest to you:
 
 | Key | What it does | How to set it |
 |---|---|---|
@@ -175,14 +184,13 @@ The flags are the non-interactive API. On a non-TTY — a pipe, `CI=true`, or
                               --client or --login), and consent to the Python SDK
                               install
 --client <name>               surface to install; repeatable or comma-separated
---login                       credentials only: verify a key, write it, exit
+--login                       use a new key even if one is saved: verify it, save
+                              it, and give it to every tool this run sets up
 --base-url <url>              Telem deployment to configure and verify against
 --key-env <VAR>               read the API key from this env var instead of prompting
 --auto-routing <mode>         let Telem choose the providers for each search:
                               accuracy | off. On (accuracy) by default; "off" turns
-                              it off and is kept on later runs. The wizard asks this
-                              as a step of its own; this flag answers it and skips
-                              it. accuracy is available
+                              it off and is kept on later runs. accuracy is available
                               now; latency and search_cost routing are coming shortly
 --project                     also write <cwd>/.telem/telem.json
 --codex-disable-web-search    also switch Codex's default web search and fetch to
@@ -225,8 +233,8 @@ npm create @telemai -- --yes --client opencode --client codex --key-env TELEM_AP
 npx @telemai/create --login --key-env TELEM_API_KEY
 
 # see the plan without touching anything
-# (--yes is what makes it flags-only; an interactive --dry-run still runs the whole
-#  interview, including the live key check, and ignores --client — it says so)
+# (--yes is what makes it flags-only; an interactive --dry-run still runs the live
+#  key check, and any question it needs)
 npx @telemai/create --yes --client opencode --key-env TELEM_API_KEY --dry-run
 ```
 
