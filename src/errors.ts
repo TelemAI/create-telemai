@@ -14,14 +14,21 @@ export type InstallErrorContext = "npm" | "python" | "openclaw-version"
 
 /**
  * The one line of a failed command's output worth showing: the first line that says
- * "error", else the last non-empty line. Not the first line: that is usually progress
- * chatter (Hermes prints "Preparing the isolated Hermes runtime…" before its real
- * "Error: …"). Not the last error line: npm always ends with "npm error A complete log
- * of this run can be found in: …", after the line that names the cause.
+ * "error" (or that it failed, was refused, or was not installed), else the last
+ * non-empty line of stderr, else of everything. Not the first line: that is usually
+ * progress chatter (Hermes prints "Preparing the isolated Hermes runtime…" before its
+ * real "Error: …"). Not the last error line: npm always ends with "npm error A complete
+ * log of this run can be found in: …", after the line that names the cause. Not simply
+ * the last line: OpenClaw 2026.10 puts its refusal ("… The plugin was not installed.
+ * Re-run … with --accept-capabilities") on stderr and ends stdout with an unrelated
+ * manifest-id warning.
  */
-export function failureLine(raw: string): string {
-  const lines = raw.split("\n").map((line) => line.trim()).filter(Boolean)
-  return lines.find((line) => /error/i.test(line)) ?? lines.at(-1) ?? ""
+export function failureLine(raw: string, stderr = ""): string {
+  const nonEmpty = (text: string) => text.split("\n").map((line) => line.trim()).filter(Boolean)
+  const lines = nonEmpty(raw)
+  return (
+    lines.find((line) => /error|failed|refused|not installed/i.test(line)) ?? nonEmpty(stderr).at(-1) ?? lines.at(-1) ?? ""
+  )
 }
 
 /**

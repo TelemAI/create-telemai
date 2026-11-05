@@ -2709,9 +2709,14 @@ function planOpenclaw(ports: Ports, plan: Plan, tools: Record<string, ToolInfo>)
     setOutcome(plan, "openclaw", "failed", message)
     return
   }
+  // OpenClaw 2026.10 refuses a non-interactive plugin install until its capabilities are
+  // accepted, and an older OpenClaw does not know the flag. Detect it the way Hermes's
+  // --yes-deps is: by the install command's own --help.
+  const help = ports.exec([openclaw, "plugins", "install", "--help"])
+  const acceptFlag = `${help.stdout}${help.stderr}`.includes("--accept-capabilities") ? ["--accept-capabilities"] : []
   plan.commands.push({
     surface: "openclaw",
-    argv: [openclaw, ...installArgv],
+    argv: [openclaw, ...installArgv, ...acceptFlag],
     reason: `install ${OPENCLAW_PACKAGE} as an OpenClaw plugin`,
     optional: false,
   })
@@ -3408,7 +3413,7 @@ async function finish(
     const detail =
       (translated ??
         `${result.command.argv[0]} exited ${result.status ?? "abnormally"}${
-          raw ? `: ${failureLine(raw)}` : ""
+          raw ? `: ${failureLine(raw, result.stderr)}` : ""
         }`) +
       // config.toml (with the hook's trust) landed before this command ran.
       (outcomeId === "codex" && result.command.argv[1] === "plugin"
