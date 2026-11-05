@@ -46,6 +46,8 @@
 // candidate, and only with consent; and on an already-hosted table only the
 // Authorization line is ever rewritten.
 
+import { HOSTED_MCP_URL } from "./credentials.ts"
+
 export type CodexEdit =
   | {
       status: "unchanged"
@@ -53,6 +55,10 @@ export type CodexEdit =
       /** Every requested trust entry is already in the file with the right hash. */
       hookTrustSatisfied: boolean
       hookTrustAbstained: boolean
+      /** The telem table points at a url that is not ours (set only then). */
+      foreignUrl?: string
+      /** The table carries the saved key at a url that is not ours (set only then). */
+      heldKeyUrl?: string
     }
   | {
       status: "write"
@@ -74,6 +80,9 @@ export type CodexEdit =
        * brought in line with the effective key — added when it had none, replaced
        * when it carried a stale one. Nothing else in that table was touched. */
       reconciled: boolean
+      /** An existing table of ours pointed at another Telem endpoint and was repointed
+       * at this run's `mcpUrl`; the url it had, for the undo line. Null otherwise. */
+      repointedFrom: string | null
       /** A hosted telem table was written but WITHOUT the auth header (no key was
        * available), so the run must tell the user to add their key by hand. */
       keylessHostedTable: boolean
@@ -83,6 +92,11 @@ export type CodexEdit =
        * malformed — a distinct reason from "no key was available". Only meaningful
        * together with `keylessHostedTable`. */
       keyMalformed: boolean
+      /** The telem table points at a url that is not ours, so it was left alone (set only then). */
+      foreignUrl?: string
+      /** The table carries the saved key at a url that is not ours, so it was left alone
+       * (set only then; `entryOwnership`). */
+      heldKeyUrl?: string
       /** At least one `[hooks.state."…"]` trust entry was written or brought in
        * line with the plugin's current hook hash. */
       hookTrustWritten: boolean
@@ -116,8 +130,85 @@ export type CodexEdit =
 export const CODEX_TABLE_PARTS = ["mcp_servers", "telem"] as const
 export const CODEX_TABLE = CODEX_TABLE_PARTS.join(".")
 export const CODEX_WEB_SEARCH_KEY = "web_search"
-/** The hosted Telem MCP endpoint Codex's remote server points at. */
-export const CODEX_URL = "https://mcp.telem.ai/mcp"
+/** The hosted Telem MCP endpoint Codex's remote server points at by default. A private
+ * deployment's `--mcp-url` replaces it; every editor here takes that as `mcpUrl`. */
+export const CODEX_URL = HOSTED_MCP_URL
+
+/**
+ * Is this server url OURS — one this installer may repoint and re-key? The url this run
+ * points at, the hosted default, or the endpoint saved by an earlier run (`prior`), so
+ * that switching back to the hosted endpoint repoints a private one too. Any other url
+ * is the user's own server and is never touched.
+ */
+export function isTelemMcpUrl(url: unknown, mcpUrl: string, prior?: string | readonly string[]): boolean {
+  if (typeof url !== "string") return false
+  if (url === mcpUrl || url === CODEX_URL) return true
+  return typeof prior === "string" ? url === prior : (prior ?? []).includes(url)
+}
+
+/** "the hosted <url>", or "the Telem MCP at <url>" for a private endpoint. */
+export function mcpPhrase(url: string): string {
+  return url === CODEX_URL ? `the hosted ${url}` : `the Telem MCP at ${url}`
+}
+
+/** The `(…)` a TOML table's add/create change names: "hosted url" on the hosted endpoint,
+ * as it always read, else the private endpoint (through `mcpPhrase`). */
+export function tableChangeNote(mcpUrl: string, apiKey: string | null): string {
+  return `(${mcpUrl === CODEX_URL ? "hosted url" : mcpPhrase(mcpUrl)}${apiKey ? " + auth header" : ""})`
+}
+
+/** The change line for a JSON editor's new `mcpServers.telem`. */
+export function addServerChange(mcpUrl: string): string {
+  return mcpUrl === CODEX_URL ? "add the hosted telem MCP server" : `add the telem MCP server (${mcpPhrase(mcpUrl)})`
+}
+
+/** Who an existing entry belongs to. See `entryOwnership`. */
+export type EntryOwnership = {
+  /** The urls, besides `mcpUrl` and the hosted one, that count as ours. */
+  prior: string[]
+  /** Set when the entry carries the saved key at a url that is NOT ours on this run: it
+   * is left exactly as it is, and the run may say so (only when the key changes). */
+  heldKeyUrl: string | null
+}
+
+/**
+ * Is an existing entry ours?
+ *
+ * By url: `mcpUrl`, the hosted one, or the endpoint an earlier run saved. By KEY only when
+ * the user has named a deployment (`repointKeyed`: an explicit `--mcp-url`, the hosted one
+ * included, or a saved `mcpUrl`): an entry carrying the key saved in credentials.json is
+ * then ours whatever its url, and is repointed and re-keyed. That finds an entry a
+ * narrower run left behind (`--client` named other tools when the endpoint changed).
+ *
+ * On the implicit hosted default a key match proves nothing: a user may have pointed a
+ * `telem` entry at a server of their own (a proxy) with their key, and an installer that
+ * never wrote it must not add headers there, nor send it a rotated key. It is left alone,
+ * and reported as `heldKeyUrl` so a run that changes the key can say it still holds the
+ * old one.
+ */
+export function entryOwnership(
+  entry: { url: unknown; bearer: string | null },
+  options: { mcpUrl: string; priorMcpUrl?: string; savedApiKey?: string; repointKeyed?: boolean },
+): EntryOwnership {
+  const prior = options.priorMcpUrl === undefined ? [] : [options.priorMcpUrl]
+  const url = entry.url
+  const keyed =
+    typeof url === "string" &&
+    !!options.savedApiKey &&
+    entry.bearer === options.savedApiKey &&
+    !isTelemMcpUrl(url, options.mcpUrl, prior)
+  if (!keyed) return { prior, heldKeyUrl: null }
+  if (options.repointKeyed) return { prior: [...prior, url], heldKeyUrl: null }
+  return { prior, heldKeyUrl: url }
+}
+
+/** The Bearer value of a JSON `headers` object's Authorization, whatever its case. */
+export function headersBearer(headers: unknown): string | null {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null
+  const value = Object.entries(headers as Record<string, unknown>).find(([name]) => name.toLowerCase() === "authorization")?.[1]
+  const match = typeof value === "string" ? /^Bearer\s+(\S+)\s*$/i.exec(value) : null
+  return match ? match[1] : null
+}
 /** The hosted MCP's per-connection auto-routing switch. The server accepts exactly
  * these two values and refuses the connection on any other, so nothing else is
  * ever written. */
@@ -391,8 +482,9 @@ export function remoteTableBody(
   apiKey: string | null,
   routing: HostedRouting | null,
   headersKey: HeadersKey = "http_headers",
+  mcpUrl: string = CODEX_URL,
 ): TomlLine[] {
-  const body: TomlLine[] = [{ kind: "pair", text: `url = "${CODEX_URL}"`, key: "url", parts: ["url"] }]
+  const body: TomlLine[] = [{ kind: "pair", text: `url = "${mcpUrl}"`, key: "url", parts: ["url"] }]
   if (apiKey) body.push(authHeaderLine(apiKey, routing, headersKey))
   return body
 }
@@ -415,8 +507,9 @@ export function remoteTableText(
   apiKey: string | null,
   routing: HostedRouting | null,
   headersKey: HeadersKey = "http_headers",
+  mcpUrl: string = CODEX_URL,
 ): string {
-  return `[${CODEX_TABLE}]\n${remoteTableBody(apiKey, routing, headersKey)
+  return `[${CODEX_TABLE}]\n${remoteTableBody(apiKey, routing, headersKey, mcpUrl)
     .map((line) => line.text)
     .join("\n")}\n`
 }
@@ -498,6 +591,19 @@ export function stringValue(raw: string): string | null {
  */
 const HOSTED_AUTH_BEARER = /((?:"Authorization"|'Authorization'|Authorization)\s*=\s*")Bearer\s+([^"]*)(")/i
 
+/** The telem table's own `url`, as a single-line string, or null. */
+export function tableUrl(lines: readonly TomlLine[], telem: TelemTable): string | null {
+  const pair = telem.pairs.find((line) => isKeyPath(line.parts, ["url"]))
+  return pair ? stringValue(currentValue(pair.text)) : null
+}
+
+/** The Bearer value in the telem table's one-line inline headers, or null. */
+export function tableBearer(telem: TelemTable, headersKey: HeadersKey = "http_headers"): string | null {
+  const pair = telem.pairs.find((line) => isKeyPath(line.parts, [headersKey]))
+  const match = pair ? HOSTED_AUTH_BEARER.exec(pair.text) : null
+  return match ? match[2].trim() || null : null
+}
+
 /**
  * Bring an EXISTING hosted table's auth header in line with the effective key.
  *
@@ -521,6 +627,8 @@ export function reconcileHostedAuth(
   apiKey: string | null,
   routing: HostedRouting | null,
   headersKey: HeadersKey = "http_headers",
+  mcpUrl: string = CODEX_URL,
+  prior?: string | readonly string[],
 ): "added" | "replaced" | null {
   if (!apiKey) return null
   const urlIndex = lines.findIndex(
@@ -528,7 +636,7 @@ export function reconcileHostedAuth(
       index > telem.headerIdx && index < telem.ownEnd && line.kind === "pair" && isKeyPath(line.parts, ["url"]),
   )
   if (urlIndex === -1) return null
-  if (stringValue(currentValue(lines[urlIndex].text)) !== CODEX_URL) return null
+  if (!isTelemMcpUrl(stringValue(currentValue(lines[urlIndex].text)), mcpUrl, prior)) return null
 
   // `[mcp_servers.telem.http_headers]` and `http_headers.X = …` both define the
   // name as a table; adding a second inline `http_headers` beside either would
@@ -562,6 +670,29 @@ export function reconcileHostedAuth(
   return "replaced"
 }
 
+/**
+ * Point an EXISTING table of ours at `mcpUrl`: its one-line `url` is rewritten when it
+ * names another Telem endpoint (the hosted default, or the one an earlier run saved).
+ * A url that is not ours, a multi-line value, or one that already matches is left as
+ * it is. Mutates `lines` (the line count does not change); returns the url it replaced.
+ */
+export function repointHostedUrl(
+  lines: TomlLine[],
+  telem: TelemTable,
+  mcpUrl: string,
+  prior?: string | readonly string[],
+): string | null {
+  const urlIndex = lines.findIndex(
+    (line, index) =>
+      index > telem.headerIdx && index < telem.ownEnd && line.kind === "pair" && isKeyPath(line.parts, ["url"]),
+  )
+  if (urlIndex === -1 || lines[urlIndex + 1]?.kind === "continuation") return null
+  const current = stringValue(currentValue(lines[urlIndex].text))
+  if (current === null || current === mcpUrl || !isTelemMcpUrl(current, mcpUrl, prior)) return null
+  lines[urlIndex] = { kind: "pair", key: "url", parts: ["url"], text: replaceValue(lines[urlIndex].text, `"${mcpUrl}"`) }
+  return current
+}
+
 const ROUTING_PAIR = /((?:"X-Telem-Auto-Routing"|'X-Telem-Auto-Routing'|X-Telem-Auto-Routing)\s*=\s*)("[^"]*"|'[^']*')/i
 
 /**
@@ -577,11 +708,13 @@ export function reconcileHostedRouting(
   telem: TelemTable,
   routing: HostedRouting | null,
   headersKey: HeadersKey = "http_headers",
+  mcpUrl: string = CODEX_URL,
+  prior?: string | readonly string[],
 ): "added" | "replaced" | null {
   if (!routing) return null
   const inTable = (index: number) => index > telem.headerIdx && index < telem.ownEnd
   const urlIndex = lines.findIndex((line, index) => inTable(index) && line.kind === "pair" && isKeyPath(line.parts, ["url"]))
-  if (urlIndex === -1 || stringValue(currentValue(lines[urlIndex].text)) !== CODEX_URL) return null
+  if (urlIndex === -1 || !isTelemMcpUrl(stringValue(currentValue(lines[urlIndex].text)), mcpUrl, prior)) return null
   if (telem.subTables.some((parts) => isKeyPath(parts, [...CODEX_TABLE_PARTS, headersKey]))) return null
   if (telem.pairs.some((pair) => isUnderKeyPath(pair.parts, [headersKey]))) return null
   const headerIndex = lines.findIndex(
@@ -906,10 +1039,19 @@ export function planCodexConfig(
     /** The `X-Telem-Auto-Routing` value for the hosted connection; absent → the
      * header is neither written nor touched. */
     autoRouting?: HostedRouting | null
+    /** The Telem MCP endpoint to point at; absent → the hosted one. */
+    mcpUrl?: string
+    /** The endpoint an earlier run saved, so a table still on it counts as ours. */
+    priorMcpUrl?: string
+    /** The key saved in credentials.json: a table carrying it is ours whatever its url. */
+    savedApiKey?: string
+    /** Repoint a table that is ours only by its key (`entryOwnership`). */
+    repointKeyed?: boolean
   },
   path: string,
 ): CodexEdit {
   const routing = options.autoRouting ?? null
+  const mcpUrl = options.mcpUrl ?? CODEX_URL
   const rawApiKey = options.apiKey ?? null
   // A key that is not the tlm_ urlsafe-base64 charset must NEVER be interpolated into
   // the inline http_headers table — a crafted value (a `"` plus a newline) would
@@ -918,10 +1060,10 @@ export function planCodexConfig(
   // simply "no key", not malformed.
   const keyMalformed = rawApiKey !== null && rawApiKey.length > 0 && !CODEX_KEY_CHARSET.test(rawApiKey)
   const apiKey = keyMalformed ? null : rawApiKey
-  const manual = `add\n\n  [${CODEX_TABLE}]\n  url = "${CODEX_URL}"\n\nto ${path} by hand`
+  const manual = `add\n\n  [${CODEX_TABLE}]\n  url = "${mcpUrl}"\n\nto ${path} by hand`
 
   if (source === null) {
-    const changes = [`create with [${CODEX_TABLE}] (hosted url${apiKey ? " + auth header" : ""})`]
+    const changes = [`create with [${CODEX_TABLE}] ${tableChangeNote(mcpUrl, apiKey)}`]
     // Bare top-level keys must precede the first table header, so both go in the head.
     let head = ""
     if (options.disableWebSearch) {
@@ -938,7 +1080,7 @@ export function planCodexConfig(
     // abstain guards and the exact table shape have one implementation. The text we
     // just built is TOML we wrote ourselves, so re-scanning it cannot fail; if it
     // somehow did, the trust tables are skipped rather than the install broken.
-    const freshScan = scanToml(`${head}${remoteTableText(apiKey, routing)}`)
+    const freshScan = scanToml(`${head}${remoteTableText(apiKey, routing, "http_headers", mcpUrl)}`)
     const fresh: TomlLine[] = freshScan.ok ? freshScan.lines.slice(0, -1) : []
     const trust = freshScan.ok
       ? applyHookTrust(fresh, options.hookTrust ?? [], changes)
@@ -949,6 +1091,7 @@ export function planCodexConfig(
       changes,
       addedTable: true,
       reconciled: false,
+      repointedFrom: null,
       keylessHostedTable: !apiKey,
       keyMalformed,
       hookTrustWritten: trust.written,
@@ -956,7 +1099,7 @@ export function planCodexConfig(
       hookTrustAbstained: trust.abstained,
       contents: freshScan.ok
         ? `${fresh.map((line) => line.text).join("\n")}\n`
-        : `${head}${remoteTableText(apiKey, routing)}`,
+        : `${head}${remoteTableText(apiKey, routing, "http_headers", mcpUrl)}`,
     }
   }
 
@@ -1072,6 +1215,9 @@ export function planCodexConfig(
 
   let addedTable = false
   let reconciled = false
+  let repointedFrom: string | null = null
+  let foreignUrl: string | null = null
+  let heldKeyUrl: string | null = null
   let wroteHostedTable = false
   const telem = findTelemTable(lines)
   if (telem === null) {
@@ -1079,8 +1225,8 @@ export function planCodexConfig(
     while (lines.length && lines[lines.length - 1].kind === "blank") lines.pop()
     if (lines.length) lines.push({ kind: "blank", text: "" })
     lines.push({ kind: "header", text: `[${CODEX_TABLE}]`, name: CODEX_TABLE, parts: [...CODEX_TABLE_PARTS] })
-    lines.push(...remoteTableBody(apiKey, routing))
-    changes.push(`add [${CODEX_TABLE}] (hosted url${apiKey ? " + auth header" : ""})`)
+    lines.push(...remoteTableBody(apiKey, routing, "http_headers", mcpUrl))
+    changes.push(`add [${CODEX_TABLE}] ${tableChangeNote(mcpUrl, apiKey)}`)
     addedTable = true
     wroteHostedTable = true
   } else {
@@ -1092,10 +1238,20 @@ export function planCodexConfig(
       !telem.pairs.some((pair) => isKeyPath(pair.parts, ["url"])) &&
       telem.pairs.some((pair) => isKeyPath(pair.parts, ["command"]))
     if (!isStdio) {
+      const current = tableUrl(lines, telem)
+      const own = entryOwnership({ url: current, bearer: tableBearer(telem) }, { ...options, mcpUrl })
+      const { prior } = own
+      const target = mcpUrl
+      heldKeyUrl = own.heldKeyUrl
+      if (current !== null && !isTelemMcpUrl(current, target, prior)) foreignUrl = current
       // Already hosted. The url stays the user's, but an auth header that is absent
       // or stale is reconciled with the effective key — otherwise a keyless first
       // run, or a rotated key, leaves this table 401ing forever under a "unchanged".
-      const outcome = reconcileHostedAuth(lines, telem, apiKey, routing)
+      // A table on another Telem endpoint (the hosted default, a private one an earlier
+      // run saved) is repointed at this run's first; the reconciles below then see ours.
+      repointedFrom = repointHostedUrl(lines, telem, target, prior)
+      if (repointedFrom !== null) changes.push(`point [${CODEX_TABLE}] at ${target} (was ${repointedFrom})`)
+      const outcome = reconcileHostedAuth(lines, telem, apiKey, routing, "http_headers", target, prior)
       if (outcome !== null) {
         changes.push(
           outcome === "added"
@@ -1104,7 +1260,7 @@ export function planCodexConfig(
         )
         reconciled = true
       }
-      const routed = reconcileHostedRouting(lines, telem, routing)
+      const routed = reconcileHostedRouting(lines, telem, routing, "http_headers", target, prior)
       if (routed !== null) {
         changes.push(`set ${ROUTING_HEADER} = "${routing}" in [${CODEX_TABLE}]`)
         reconciled = true
@@ -1120,6 +1276,8 @@ export function planCodexConfig(
       reason: `${path} already has [${CODEX_TABLE}]`,
       hookTrustSatisfied: trust.satisfied,
       hookTrustAbstained: trust.abstained,
+      ...(foreignUrl !== null ? { foreignUrl } : {}),
+      ...(heldKeyUrl !== null ? { heldKeyUrl } : {}),
     }
   }
   const contents = `${lines.map((line) => line.text).join("\n").replace(/\n+$/, "")}\n`
@@ -1130,8 +1288,11 @@ export function planCodexConfig(
     changes,
     addedTable,
     reconciled,
+    repointedFrom,
     keylessHostedTable: wroteHostedTable && !apiKey,
     keyMalformed,
+    ...(foreignUrl !== null ? { foreignUrl } : {}),
+    ...(heldKeyUrl !== null ? { heldKeyUrl } : {}),
     hookTrustWritten: trust.written,
     hookTrustSatisfied: trust.satisfied,
     hookTrustAbstained: trust.abstained,

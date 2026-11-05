@@ -62,7 +62,7 @@ OpenCode itself is a Bun binary.
 
 | File | What | Mode |
 |---|---|---|
-| `~/.telem/credentials.json` | `{"apiKey", "baseUrl"}` — the ONE credential home | `0600`, in a `0700` directory |
+| `~/.telem/credentials.json` | `{"apiKey", "baseUrl"}` — the ONE credential home — plus `"mcpUrl"` only for a private MCP endpoint (`--mcp-url`); a hosted install never has it | `0600`, in a `0700` directory |
 | `~/.telem/telem.json` | your Telem options, read by every surface | `0644` |
 | `<project>/.telem/telem.json` | the same, shared with the repo (offered only inside a project) | `0644` |
 | `~/.config/opencode/opencode.json(c)` | `@telemai/opencode-plugin` added to the `plugin` array | unchanged |
@@ -135,7 +135,7 @@ and the summary at the end names each one by its real path.
 | `openclaw` | `openclaw plugins install npm:@telemai/openclaw-plugin --force` + `openclaw config set tools.alsoAllow` (merged with whatever it already allows, because `config set` replaces the array). The wizard owns the version gate: openclaw below `2026.7.1` cannot load the plugin and is refused rather than "installed" into. It does **not** delegate to `telem-openclaw-setup` — that is a source-checkout dev tool (`npm ci` + `--link`), and the published tarball has no lockfile for `npm ci`. |
 | `hermes` | `hermes plugins install TelemAI/hermes-plugin --yes-deps --enable`: Hermes clones the plugin and installs `telem-sdk` into its own managed environment. On a re-run, when `~/.hermes/plugins/telem` (or `$HERMES_HOME/plugins/telem`) already exists, only `hermes plugins enable telem`. The key comes from `~/.telem/credentials.json`, like every surface. |
 | `claude-skill` | `telem-install-skill` |
-| `mcp-json` | prints a ready-to-paste `mcpServers` snippet for the **hosted** server (`https://mcp.telem.ai/mcp` + an `Authorization: Bearer` header). Nothing local is spawned, so it needs no Python; paste your own key from `~/.telem/credentials.json` — the installer never prints it |
+| `mcp-json` | prints a ready-to-paste `mcpServers` snippet for the **hosted** server (`https://mcp.telem.ai/mcp`, or your `--mcp-url` + an `Authorization: Bearer` header). Nothing local is spawned, so it needs no Python; paste your own key from `~/.telem/credentials.json` — the installer never prints it |
 
 The Claude Skill (`claude-skill`) runs a `telem-sdk` console script, so it needs
 the Python SDK — and it is the only surface that does. If it is missing, the
@@ -174,6 +174,39 @@ The wizard does not ask. It uses `https://router.telem.ai`, or whatever
 `~/.telem/credentials.json` already records. **Given a different Telem endpoint? Pass `--base-url`** —
 it is both configured and verified against.
 
+A private deployment usually has its own MCP endpoint too. **Pass `--mcp-url`** with
+the full URL, path included — it is used as given, nothing is appended:
+
+```sh
+npx @telemai/create --base-url https://router.example.com --mcp-url https://mcp.example.com/mcp \
+  --key-env TELEM_API_KEY --client codex --yes
+```
+
+Every surface that talks to the hosted MCP then points at it instead: Codex, Grok
+Build, Muse, VS Code, Cursor, Devin, the `mcp-json` snippet, and the Claude Code
+plugin (the installer's copy in `~/.telem/plugins/claude-plugin-telem` gets the url in
+its `.claude-plugin/plugin.json`; the copy is otherwise unchanged). Both urls are saved
+in `~/.telem/credentials.json` (`baseUrl`, and `mcpUrl` when it is not the hosted one),
+so later runs — `--login` included — keep them without the flags; that holds on a
+re-run that keeps your saved key, too (a `--base-url` your saved key was just refused
+at is not saved). A server entry on the hosted endpoint, or on the one saved before, is
+repointed and re-keyed. Once you name a deployment (`--mcp-url`, the hosted url
+included, or a saved `mcpUrl`), an entry carrying the key saved in `credentials.json`
+is also yours: it is repointed and re-keyed, which finds a tool a narrower run left on
+the old endpoint. Without one, an entry on any other url is your own server — a proxy,
+say — and is never written, whatever key it holds; a run that replaces your key names
+each such entry still holding the old one. On a private install the run also names
+entries on other urls.
+The url is used verbatim, so one with spaces, quotes, `\`, `<>`, a control character,
+`${` or a `user:pass@` part is refused, and plain `http://` to another machine is
+warned about (for `--base-url` too: the key would cross the network in cleartext, and
+an http→https redirect drops the Authorization header, so requests fail with 401). A
+`--base-url` other than the hosted one, with no `--mcp-url`, warns as well when you
+install an MCP tool: that tool would send your key to the hosted MCP server. A saved `mcpUrl` the installer cannot use stops the run, naming the
+file; fix or remove it, or pass `--mcp-url`. `--mcp-url https://mcp.telem.ai/mcp` goes back to the hosted
+endpoint and drops `mcpUrl` from the file. A Claude Code `telem` marketplace you added
+from GitHub is not the installer's copy, so it keeps the hosted server (the run warns).
+
 ## Flags
 
 The flags are the non-interactive API. On a non-TTY — a pipe, `CI=true`, or
@@ -188,6 +221,9 @@ The flags are the non-interactive API. On a non-TTY — a pipe, `CI=true`, or
 --login                       use a new key even if one is saved: verify it, save
                               it, and give it to every tool this run sets up
 --base-url <url>              Telem deployment to configure and verify against
+--mcp-url <url>               Telem MCP endpoint every hosted tool points at, used
+                              as given (e.g. https://mcp.example.com/mcp); for a
+                              private deployment. Saved, so later runs keep it
 --key-env <VAR>               read the API key from this env var instead of prompting
 --auto-routing <mode>         let Telem choose the providers for each search:
                               accuracy | off. On (accuracy) by default; "off" turns

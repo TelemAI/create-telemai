@@ -30,9 +30,9 @@
 
 import { dirname, join } from "node:path"
 
-import { CODEX_URL, ROUTING_HEADER, type HostedRouting } from "./codex.ts"
+import { CODEX_URL, ROUTING_HEADER, addServerChange, entryOwnership, headersBearer, isTelemMcpUrl, type HostedRouting } from "./codex.ts"
 
-/** The hosted Telem MCP endpoint — the one every hosted surface points at. */
+/** The hosted Telem MCP endpoint — the one every hosted surface points at by default. */
 export const MUSE_URL = CODEX_URL
 /** Muse names a server's tools `mcp__<server>__<tool>`. */
 export const MUSE_HOOK_MATCHER = "^mcp__telem__telem_(search|fetch)$"
@@ -67,10 +67,20 @@ export type MuseSettingsInput = {
   /** The hook command to register, or null to leave hooks alone. */
   hookCommand: string | null
   disableWebSearch: boolean
+  /** The Telem MCP endpoint to point at; absent → the hosted one. */
+  mcpUrl?: string
+  /** The endpoint an earlier run saved, so an entry still on it counts as ours. */
+  priorMcpUrl?: string
+  /** The key saved in credentials.json: an entry carrying it is ours whatever its url. */
+  savedApiKey?: string
+  /** Repoint an entry that is ours only by its key (`entryOwnership`). */
+  repointKeyed?: boolean
 }
 
 export type MuseSettingsEdit =
-  | { status: "unchanged" }
+  /** `foreignUrl`: the telem entry points at a url that is not ours; `heldKeyUrl`: it also
+   * carries the saved key. Each set only then. */
+  | { status: "unchanged"; foreignUrl?: string; heldKeyUrl?: string }
   | {
       status: "write"
       contents: string
@@ -82,6 +92,13 @@ export type MuseSettingsEdit =
       addedHook: boolean
       /** An existing hosted entry had its Authorization/routing headers updated. */
       reconciled: boolean
+      /** An existing entry of ours pointed at another Telem endpoint and now points at
+       * this run's `mcpUrl`; the url it had, for the undo line. Null otherwise. */
+      repointedFrom: string | null
+      /** The telem entry points at a url that is not ours, so it was left alone (set only then). */
+      foreignUrl?: string
+      /** The entry carries the saved key at a url that is not ours (set only then). */
+      heldKeyUrl?: string
       /** The telem entry has no key to authenticate with; the run must say so. */
       keyless: boolean
     }
@@ -109,7 +126,9 @@ export function museWebSearchOff(source: string | null): boolean {
   return isObj(webSearch) && webSearch.mode === "off"
 }
 
-/** The hosted server's CDN refuses a request with no User-Agent, and Muse sends none.
+/** The Telem MCP's CDN refuses a request with no User-Agent, and Muse sends none — the
+ * hosted one and, as far as we have seen, a private deployment's too, so the header goes
+ * in every entry of ours, whatever its url.
  * Any non-blank value already there is kept: the CDN needs only one. */
 const USER_AGENT_HEADER = "User-Agent"
 const USER_AGENT = "telem-muse"
@@ -170,18 +189,20 @@ function withTelemHook(prior: unknown[], handler: Json): unknown[] {
 }
 
 /** The entry to paste by hand, for a refusal: never with the real key. */
-const SNIPPET = JSON.stringify(
-  { mcpServers: { telem: { transport: "streamable_http", url: MUSE_URL, headers: { Authorization: "Bearer tlm_…" }, mode: "optional" } } },
-  null,
-  2,
-)
+const snippet = (url: string): string =>
+  JSON.stringify(
+    { mcpServers: { telem: { transport: "streamable_http", url, headers: { Authorization: "Bearer tlm_…" }, mode: "optional" } } },
+    null,
+    2,
+  )
 
 export function planMuseSettings(source: string | null, input: MuseSettingsInput, path: string): MuseSettingsEdit {
-  const refuse = (what: string, snippet = false): MuseSettingsEdit => ({
+  const mcpUrl = input.mcpUrl ?? MUSE_URL
+  const refuse = (what: string, withSnippet = false): MuseSettingsEdit => ({
     status: "unparseable",
     reason:
       `${path} ${what} and will not be overwritten; fix or remove it, then re-run` +
-      (snippet ? `. The Telem entry to add by hand:\n\n${SNIPPET}` : ""),
+      (withSnippet ? `. The Telem entry to add by hand:\n\n${snippet(mcpUrl)}` : ""),
   })
   const existing = parse(source)
   // Muse itself does not start on such a file either: strict JSON only, no comments.
@@ -211,6 +232,7 @@ export function planMuseSettings(source: string | null, input: MuseSettingsInput
   let addedServer = false
   let addedHook = false
   let reconciled = false
+  let repointedFrom: string | null = null
 
   if (out.mcp_servers !== undefined) {
     out.mcpServers = out.mcp_servers
@@ -219,18 +241,37 @@ export function planMuseSettings(source: string | null, input: MuseSettingsInput
   }
   const servers = { ...((out.mcpServers ?? {}) as Json) }
   const telem = servers.telem
+  // The saved endpoint, and this entry's own url when it carries the saved key.
+  const own = entryOwnership(
+    { url: isObj(telem) ? telem.url : undefined, bearer: isObj(telem) ? headersBearer(telem.headers) : null },
+    { ...input, mcpUrl },
+  )
+  const prior = own.prior
+  const heldKeyUrl = own.heldKeyUrl
+  const foreignUrl =
+    isObj(telem) && typeof telem.url === "string" && !isTelemMcpUrl(telem.url, mcpUrl, prior) ? telem.url : null
   const wanted = headersFor(input.apiKey, input.autoRouting)
   if (telem === undefined) {
     servers.telem = {
       transport: "streamable_http",
-      url: MUSE_URL,
+      url: mcpUrl,
       headers: wanted,
       mode: "optional",
     }
     out.mcpServers = servers
     addedServer = true
-    changes.push("add the hosted telem MCP server")
-  } else if (isObj(telem) && telem.url === MUSE_URL) {
+    changes.push(addServerChange(mcpUrl))
+  } else if (isObj(telem) && isTelemMcpUrl(telem.url, mcpUrl, prior)) {
+    // Ours on another Telem endpoint (the hosted default, or the one an earlier run
+    // saved): point it at this run's. Every other key of the entry stays.
+    let entry: Json = telem
+    if (telem.url !== mcpUrl) {
+      repointedFrom = telem.url as string
+      entry = { ...telem, url: mcpUrl }
+      servers.telem = entry
+      out.mcpServers = servers
+      changes.push(`point the telem server at ${mcpUrl} (was ${repointedFrom})`)
+    }
     // Only the headers this run writes move, whatever their case; any other header keeps
     // its value — the routing header too when this run has no routing answer (Codex), and
     // a User-Agent the user set.
@@ -247,7 +288,7 @@ export function planMuseSettings(source: string | null, input: MuseSettingsInput
     }
     for (const [name, value] of Object.entries(wanted)) if (!(name in next)) next[name] = value
     if (JSON.stringify(next) !== JSON.stringify(prior)) {
-      servers.telem = { ...telem, headers: next }
+      servers.telem = { ...entry, headers: next }
       out.mcpServers = servers
       reconciled = true
       changes.push("update the telem server's headers")
@@ -256,7 +297,7 @@ export function planMuseSettings(source: string | null, input: MuseSettingsInput
   const finalTelem = (out.mcpServers as Json | undefined)?.telem
   const keyless =
     isObj(finalTelem) &&
-    finalTelem.url === MUSE_URL &&
+    isTelemMcpUrl(finalTelem.url, mcpUrl, prior) &&
     !Object.keys(isObj(finalTelem.headers) ? finalTelem.headers : {}).some((name) => name.toLowerCase() === "authorization")
 
   if (input.hookCommand) {
@@ -281,7 +322,9 @@ export function planMuseSettings(source: string | null, input: MuseSettingsInput
     )
   }
 
-  if (!changes.length) return { status: "unchanged" }
+  if (!changes.length) {
+    return { status: "unchanged", ...(foreignUrl !== null ? { foreignUrl } : {}), ...(heldKeyUrl !== null ? { heldKeyUrl } : {}) }
+  }
   return {
     status: "write",
     contents: `${JSON.stringify(out, null, 2)}\n`,
@@ -290,13 +333,23 @@ export function planMuseSettings(source: string | null, input: MuseSettingsInput
     addedServer,
     addedHook,
     reconciled,
+    repointedFrom,
     keyless,
+    ...(foreignUrl !== null ? { foreignUrl } : {}),
+    ...(heldKeyUrl !== null ? { heldKeyUrl } : {}),
   }
 }
 
 /** How to put settings.json back: one step per change this run made, nothing more. */
 export function museUndoLine(
-  edit: { created: boolean; addedServer: boolean; addedHook: boolean; reconciled: boolean; changes: string[] },
+  edit: {
+    created: boolean
+    addedServer: boolean
+    addedHook: boolean
+    reconciled: boolean
+    repointedFrom?: string | null
+    changes: string[]
+  },
   path: string,
 ): string {
   const hookDir = join(dirname(path), "telem")
@@ -306,6 +359,7 @@ export function museUndoLine(
     steps.push("leave the mcpServers spelling (Muse writes it itself)")
   }
   if (edit.addedServer) steps.push("remove mcpServers.telem")
+  if (edit.repointedFrom) steps.push(`set mcpServers.telem.url back to ${edit.repointedFrom}`)
   if (edit.reconciled) steps.push("restore your previous headers in mcpServers.telem")
   // Only the run that added the handler may tell the user to remove it (Codex's
   // `addedTable` rule): a re-run that refreshed it leaves an install that was there before.

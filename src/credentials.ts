@@ -31,7 +31,58 @@ export const VERIFY_PATH = "/v1/search"
 // makes the request a guaranteed 422 on any valid key, so no provider is billed.
 const VERIFY_BODY = JSON.stringify({ user_input: { query: "x" }, preprocessor_names: ["_verify"] })
 
-export type Credentials = { apiKey?: string; baseUrl?: string }
+/**
+ * Why an `--mcp-url` (or a saved `mcpUrl`) cannot be used, or null when it can.
+ *
+ * The url is written VERBATIM — into TOML (`url = "<it>"` in Codex's and Grok Build's
+ * config.toml), into JSON, and into the Claude Code plugin's manifest — so it is
+ * refused rather than escaped (the CODEX_KEY_CHARSET rule):
+ *   - printable ASCII only, and none of `"'\<>`: a quote or a backslash ends the TOML
+ *     string and grafts keys of its own into the file, and a control character (or
+ *     DEL) makes the file unparseable;
+ *   - no `${`: Claude Code expands it in plugin.json, so `${user_config.TELEM_API_KEY}`
+ *     would put the key into the request path;
+ *   - no `user:pass@` part: the url is printed in notes and the summary.
+ * No real MCP endpoint needs any of these.
+ */
+export function mcpUrlProblem(url: string): string | null {
+  if (!/^https?:\/\/[\x21-\x7e]+$/i.test(url) || /["'\\<>]/.test(url)) {
+    return "must be an http(s) URL of printable characters, with no spaces, quotes, backslashes or <>"
+  }
+  if (url.includes("${")) return "must not contain ${ (Claude Code expands it in its plugin manifest)"
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return "is not a valid URL"
+  }
+  if (parsed.username || parsed.password) return "must not carry a user name or password (user:pass@host)"
+  return null
+}
+
+/** A plain `http://` url to a host that is not this machine: the Bearer key would then
+ * cross the network in cleartext. Allowed (a private network may be fine), but warned. */
+export function isCleartextRemote(url: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== "http:") return false
+  const host = parsed.hostname.replace(/^\[|\]$/g, "")
+  return !(host === "localhost" || host.endsWith(".localhost") || /^127\./.test(host) || host === "::1")
+}
+
+/** The hosted Telem MCP endpoint. Every hosted surface points here unless a private
+ * deployment's `--mcp-url` (or a saved `mcpUrl`) says otherwise. */
+export const HOSTED_MCP_URL = "https://mcp.telem.ai/mcp"
+
+/**
+ * `mcpUrl` is written ONLY for a non-hosted endpoint: a hosted user's file never
+ * carries it, so it stays byte-identical to what earlier versions wrote.
+ */
+export type Credentials = { apiKey?: string; baseUrl?: string; mcpUrl?: string }
 
 export type VerifyResult =
   | { status: "ok" }
@@ -142,7 +193,12 @@ function withRouterText(base: string, text: string | null): string {
  * is machine-written today, but "we only wrote apiKey and baseUrl last time" is
  * not a reason to delete whatever a later version put there.
  */
-export function credentialsContents(existing: unknown, next: Credentials): string {
+export function credentialsContents(
+  existing: unknown,
+  // `mcpUrl: null` REMOVES a saved one (the user went back to the hosted endpoint);
+  // undefined, like the other two, keeps whatever the file has.
+  next: Omit<Credentials, "mcpUrl"> & { mcpUrl?: string | null },
+): string {
   const base: Record<string, unknown> =
     existing && typeof existing === "object" && !Array.isArray(existing)
       ? { ...(existing as Record<string, unknown>) }
@@ -152,8 +208,10 @@ export function credentialsContents(existing: unknown, next: Credentials): strin
   else if (typeof base.apiKey === "string") out.apiKey = base.apiKey
   if (next.baseUrl !== undefined) out.baseUrl = next.baseUrl
   else if (typeof base.baseUrl === "string") out.baseUrl = base.baseUrl
+  if (typeof next.mcpUrl === "string") out.mcpUrl = next.mcpUrl
+  else if (next.mcpUrl === undefined && base.mcpUrl !== undefined) out.mcpUrl = base.mcpUrl
   for (const [key, value] of Object.entries(base)) {
-    if (key === "apiKey" || key === "baseUrl") continue
+    if (key === "apiKey" || key === "baseUrl" || key === "mcpUrl") continue
     out[key] = value
   }
   return `${JSON.stringify(out, null, 2)}\n`
@@ -199,7 +257,26 @@ export function parseCredentials(source: string | null): Credentials {
   const out: Credentials = {}
   if (typeof record.apiKey === "string" && record.apiKey.trim()) out.apiKey = record.apiKey.trim()
   if (typeof record.baseUrl === "string" && record.baseUrl.trim()) out.baseUrl = record.baseUrl.trim()
+  // Held to the --mcp-url rule: the value goes verbatim into TOML, so one that would
+  // not pass the flag is not returned here — and the run then ABORTS, naming the file
+  // (`savedMcpUrlProblem`), rather than silently fall back to the hosted endpoint.
+  if (typeof record.mcpUrl === "string") {
+    const mcpUrl = record.mcpUrl.trim().replace(/\/+$/, "")
+    if (mcpUrlProblem(mcpUrl) === null) out.mcpUrl = mcpUrl
+  }
   return out
+}
+
+/**
+ * Why the `mcpUrl` an existing credentials.json holds cannot be used, or null when the
+ * file has none (or a usable one). Only a present, unusable value is a problem.
+ */
+export function savedMcpUrlProblem(source: string | null): string | null {
+  const file = readCredentialsFile(source)
+  if (file.status !== "parsed" || file.value.mcpUrl === undefined) return null
+  const value = file.value.mcpUrl
+  if (typeof value !== "string") return "is not a string"
+  return mcpUrlProblem(value.trim().replace(/\/+$/, ""))
 }
 
 /**

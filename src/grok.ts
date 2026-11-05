@@ -38,18 +38,25 @@ import {
   currentValue,
   findTelemTable,
   isKeyPath,
+  isTelemMcpUrl,
+  entryOwnership,
+  tableChangeNote,
+  tableBearer,
+  tableUrl,
   isUnderKeyPath,
   reconcileHostedAuth,
   reconcileHostedRouting,
   remoteTableBody,
   remoteTableText,
+  repointHostedUrl,
   replaceValue,
   scanToml,
+  stringValue,
   type HostedRouting,
   type TomlLine,
 } from "./codex.ts"
 
-/** The hosted Telem MCP endpoint — the one every hosted surface points at. */
+/** The hosted Telem MCP endpoint — the one every hosted surface points at by default. */
 export const GROK_URL = CODEX_URL
 export const GROK_TABLE = CODEX_TABLE
 /** Grok names an MCP server's tools `<server>__<tool>`; the hook matcher tests that name. */
@@ -80,7 +87,7 @@ const ALLOW_LINE = `allow = [${GROK_ALLOW_RULES.map((rule) => `"${rule}"`).join(
 
 export type GrokConfigEdit =
   /** Nothing to write. `permissionManual` as in the write case. */
-  | { status: "unchanged"; permissionManual: string | null }
+  | { status: "unchanged"; permissionManual: string | null; foreignUrl?: string; heldKeyUrl?: string }
   | {
       status: "write"
       contents: string
@@ -90,8 +97,14 @@ export type GrokConfigEdit =
       addedTable: boolean
       /** An existing hosted table had its headers brought in line with this run. */
       reconciled: boolean
+      /** An existing table of ours was repointed at this run's `mcpUrl`; the url it had. */
+      repointedFrom: string | null
       /** The hosted table has no key to authenticate with; the run must say so. */
       keyless: boolean
+      /** The telem table points at a url that is not ours, so it was left alone (set only then). */
+      foreignUrl?: string
+      /** The table carries the saved key at a url that is not ours (set only then). */
+      heldKeyUrl?: string
       /** A key was given but is not a tlm_ key, so no header was built from it. */
       keyMalformed: boolean
       /** The allow rule was wanted but the file already has a `permission` table:
@@ -105,6 +118,14 @@ export type GrokConfigInput = {
   autoRouting: HostedRouting | null
   disableWebSearch: boolean
   allowTelem: boolean
+  /** The Telem MCP endpoint to point at; absent → the hosted one. */
+  mcpUrl?: string
+  /** The endpoint an earlier run saved, so a table still on it counts as ours. */
+  priorMcpUrl?: string
+  /** The key saved in credentials.json: a table carrying it is ours whatever its url. */
+  savedApiKey?: string
+  /** Repoint a table that is ours only by its key (`entryOwnership`). */
+  repointKeyed?: boolean
 }
 
 const HEADERS_TABLE = ["mcp_servers", "telem", "headers"] as const
@@ -222,21 +243,30 @@ export function grokTelemAllowed(source: string | null): boolean {
 
 export function planGrokConfig(source: string | null, input: GrokConfigInput, path: string): GrokConfigEdit {
   const routing = input.autoRouting
+  const mcpUrl = input.mcpUrl ?? GROK_URL
+  // Widened below to the table's own url when it carries the saved key (`entryOwnership`).
+  let prior: string[] = input.priorMcpUrl === undefined ? [] : [input.priorMcpUrl]
+  // Is this telem pair line a `url` of ours? A basic (double-quoted) string only, as
+  // Grok writes it and as this check has always read it.
+  const oursUrl = (pair: { parts: string[]; text: string }) => {
+    const value = currentValue(pair.text)
+    return isKeyPath(pair.parts, ["url"]) && value.startsWith('"') && isTelemMcpUrl(stringValue(value), mcpUrl, prior)
+  }
   const rawKey = input.apiKey
   // The key goes verbatim into an inline TOML table, so a value outside the tlm_
   // charset is refused rather than escaped (the Codex rule).
   const keyMalformed = rawKey !== null && rawKey.length > 0 && !CODEX_KEY_CHARSET.test(rawKey)
   const apiKey = keyMalformed ? null : rawKey
-  const manual = `add\n\n  [${GROK_TABLE}]\n  url = "${GROK_URL}"\n  headers = { Authorization = "Bearer <your tlm_ key>" }\n\nto ${path} by hand`
+  const manual = `add\n\n  [${GROK_TABLE}]\n  url = "${mcpUrl}"\n  headers = { Authorization = "Bearer <your tlm_ key>" }\n\nto ${path} by hand`
 
   if (source === null) {
-    const changes = [`create with [${GROK_TABLE}] (hosted url${apiKey ? " + auth header" : ""})`]
+    const changes = [`create with [${GROK_TABLE}] ${tableChangeNote(mcpUrl, apiKey)}`]
     let text = ""
     if (input.disableWebSearch) {
       text += `${GROK_WEB_SEARCH_KEY} = true\n\n`
       changes.push(`set ${GROK_WEB_SEARCH_KEY} = true`)
     }
-    text += remoteTableText(apiKey, routing, "headers")
+    text += remoteTableText(apiKey, routing, "headers", mcpUrl)
     if (input.allowTelem) {
       text += `\n[permission]\n${ALLOW_LINE}\n`
       changes.push("add [permission] allow for the two Telem tools")
@@ -248,6 +278,7 @@ export function planGrokConfig(source: string | null, input: GrokConfigInput, pa
       changes,
       addedTable: true,
       reconciled: false,
+      repointedFrom: null,
       keyless: !apiKey,
       keyMalformed,
       permissionManual: null,
@@ -303,19 +334,31 @@ export function planGrokConfig(source: string | null, input: GrokConfigInput, pa
 
   let addedTable = false
   let reconciled = false
+  let repointedFrom: string | null = null
+  let foreignUrl: string | null = null
+  let heldKeyUrl: string | null = null
   const telem = findTelemTable(lines)
+  if (telem !== null) {
+    const subTable = headersSubTable(lines)
+    const subValue = subTable ? stringValue(currentValue(lines[headerPair(lines, subTable, "Authorization")]?.text ?? "")) : null
+    const bearer = tableBearer(telem, "headers") ?? (subValue ? (/^Bearer\s+(\S+)\s*$/i.exec(subValue)?.[1] ?? null) : null)
+    const url = tableUrl(lines, telem)
+    const own = entryOwnership({ url, bearer }, { ...input, mcpUrl })
+    prior = own.prior
+    heldKeyUrl = own.heldKeyUrl
+    if (url !== null && !isTelemMcpUrl(url, mcpUrl, prior)) foreignUrl = url
+  }
   if (telem === null) {
     while (lines.length && lines[lines.length - 1].kind === "blank") lines.pop()
     if (lines.length) lines.push({ kind: "blank", text: "" })
     lines.push({ kind: "header", text: `[${GROK_TABLE}]`, name: GROK_TABLE, parts: ["mcp_servers", "telem"] })
-    lines.push(...remoteTableBody(apiKey, routing, "headers"))
-    changes.push(`add [${GROK_TABLE}] (hosted url${apiKey ? " + auth header" : ""})`)
+    lines.push(...remoteTableBody(apiKey, routing, "headers", mcpUrl))
+    changes.push(`add [${GROK_TABLE}] ${tableChangeNote(mcpUrl, apiKey)}`)
     addedTable = true
-  } else if (
-    telem.pairs.some((pair) => isKeyPath(pair.parts, ["url"]) && currentValue(pair.text) === `"${GROK_URL}"`) &&
-    headersSubTable(lines)
-  ) {
+  } else if (telem.pairs.some(oursUrl) && headersSubTable(lines)) {
     // Ours, in the sub-table form Grok's own commands write.
+    repointedFrom = repointHostedUrl(lines, telem, mcpUrl, prior)
+    if (repointedFrom !== null) changes.push(`point [${GROK_TABLE}] at ${mcpUrl} (was ${repointedFrom})`)
     const outcome = reconcileHeadersSubTable(lines, apiKey, routing)
     if (outcome.auth !== null) {
       changes.push(
@@ -332,7 +375,10 @@ export function planGrokConfig(source: string | null, input: GrokConfigInput, pa
   } else if (telem.pairs.some((pair) => isKeyPath(pair.parts, ["url"]))) {
     // Already hosted: a custom url stays the user's; on ours, an absent or stale key
     // and the routing answer are brought in line, and nothing else in the table moves.
-    const auth = reconcileHostedAuth(lines, telem, apiKey, routing, "headers")
+    // A table on another Telem endpoint is repointed at this run's first.
+    repointedFrom = repointHostedUrl(lines, telem, mcpUrl, prior)
+    if (repointedFrom !== null) changes.push(`point [${GROK_TABLE}] at ${mcpUrl} (was ${repointedFrom})`)
+    const auth = reconcileHostedAuth(lines, telem, apiKey, routing, "headers", mcpUrl, prior)
     if (auth !== null) {
       changes.push(
         auth === "added"
@@ -342,7 +388,7 @@ export function planGrokConfig(source: string | null, input: GrokConfigInput, pa
       reconciled = true
     }
     // findTelemTable again: the auth reconcile may have added a line.
-    const routed = reconcileHostedRouting(lines, findTelemTable(lines) ?? telem, routing, "headers")
+    const routed = reconcileHostedRouting(lines, findTelemTable(lines) ?? telem, routing, "headers", mcpUrl, prior)
     if (routed !== null) {
       changes.push(`set the routing header in [${GROK_TABLE}]`)
       reconciled = true
@@ -366,16 +412,21 @@ export function planGrokConfig(source: string | null, input: GrokConfigInput, pa
   }
 
   const finalTelem = findTelemTable(lines)
-  const hosted =
-    finalTelem !== null &&
-    finalTelem.pairs.some((pair) => isKeyPath(pair.parts, ["url"]) && currentValue(pair.text) === `"${GROK_URL}"`)
+  const hosted = finalTelem !== null && finalTelem.pairs.some(oursUrl)
   const subTable = headersSubTable(lines)
   const keyless =
     hosted &&
     !finalTelem.pairs.some((pair) => isKeyPath(pair.parts, ["headers"]) && /Authorization\s*=\s*"Bearer\s+\S/i.test(pair.text)) &&
     !(subTable && /"Bearer\s+\S/.test(lines[headerPair(lines, subTable, "Authorization")]?.text ?? ""))
 
-  if (!changes.length) return { status: "unchanged", permissionManual }
+  if (!changes.length) {
+    return {
+      status: "unchanged",
+      permissionManual,
+      ...(foreignUrl !== null ? { foreignUrl } : {}),
+      ...(heldKeyUrl !== null ? { heldKeyUrl } : {}),
+    }
+  }
   return {
     status: "write",
     contents: `${lines.map((line) => line.text).join("\n").replace(/\n+$/, "")}\n`,
@@ -383,20 +434,24 @@ export function planGrokConfig(source: string | null, input: GrokConfigInput, pa
     changes,
     addedTable,
     reconciled,
+    repointedFrom,
     keyless,
     keyMalformed,
     permissionManual,
+    ...(foreignUrl !== null ? { foreignUrl } : {}),
+    ...(heldKeyUrl !== null ? { heldKeyUrl } : {}),
   }
 }
 
 /** How to put config.toml back: one step per change this run made, nothing more. */
 export function grokUndoLine(
-  edit: { created: boolean; addedTable: boolean; reconciled: boolean; changes: string[] },
+  edit: { created: boolean; addedTable: boolean; reconciled: boolean; repointedFrom?: string | null; changes: string[] },
   path: string,
 ): string {
   if (edit.created) return `rm ${path}`
   const steps: string[] = []
   if (edit.addedTable) steps.push(`remove the [${GROK_TABLE}] table`)
+  if (edit.repointedFrom) steps.push(`set url back to "${edit.repointedFrom}" in [${GROK_TABLE}]`)
   if (edit.reconciled) steps.push(`restore your previous Telem headers in [${GROK_TABLE}]`)
   for (const change of edit.changes) {
     const restored = /^set (\S+) = (\S+) \(was (.*)\)$/.exec(change)

@@ -29,6 +29,7 @@ import { dirname, join, resolve } from "node:path"
 import { credentialsPath, resolveTelemDir, userConfigPath } from "../config-core/files.ts"
 import {
   CLAUDE_PLUGIN_FILES,
+  CLAUDE_PLUGIN_MANIFEST,
   CLAUDE_PLUGIN_REF,
   CLAUDE_USER_CONFIG_KEY,
   claudeAllowRulesMissing,
@@ -36,6 +37,7 @@ import {
   claudeKnownMarketplacesPath,
   claudeMarketplaceSource,
   claudePluginConfigPath,
+  claudePluginManifestFor,
   claudePluginCopyDir,
   claudePluginUndoLine,
   claudeWebRulesMissing,
@@ -47,7 +49,6 @@ import {
 import { mergeTelemConfig } from "./configfile.ts"
 import {
   MUSE_HOOK_FILE,
-  MUSE_URL,
   museConfigDir,
   museSessionsDir,
   museSettingsPath,
@@ -57,7 +58,6 @@ import {
 } from "./muse.ts"
 import {
   COPILOT_PLUGIN_FILES,
-  COPILOT_URL,
   copilotHome,
   copilotHooksJson,
   copilotMcpConfigPath,
@@ -95,18 +95,20 @@ import type { CodexHookTrustEntry, HostedRouting } from "./codex.ts"
 import {
   CODEX_HOOK_STATE_PATH,
   CODEX_TABLE,
-  CODEX_URL,
+  mcpPhrase,
   ROUTING_HEADER,
   classifyCodexTelemTable,
   codexMarketplaceSource,
   codexWebSearchDisabled,
+  findTelemTable,
   hostedRouting,
   planCodexConfig,
+  scanToml,
+  tableUrl,
 } from "./codex.ts"
 import {
   GROK_HOOK_FILE,
   GROK_TABLE,
-  GROK_URL,
   grokConfigPath,
   grokHome,
   grokHookDir,
@@ -142,6 +144,8 @@ import {
   maskKey,
   parseCredentials,
   readCredentialsFile,
+  isCleartextRemote,
+  savedMcpUrlProblem,
   verifyKey,
 } from "./credentials.ts"
 import type { ExecResult, ToolInfo } from "./detect.ts"
@@ -254,6 +258,10 @@ export type Summary = {
   mode: "interactive" | "flags"
   dryRun: boolean
   baseUrl: string
+  /** The url this run verified against, when it is not the one saved (a refused key). */
+  attemptedBaseUrl?: string
+  /** The Telem MCP endpoint every hosted surface was pointed at this run. */
+  mcpUrl: string
   credentials: { status: string; path?: string; masked?: string }
   files: { path: string; created: boolean; reason: string; undo: string }[]
   /** Files this run DELETES (a migration off an older Telem install). */
@@ -505,6 +513,52 @@ async function drive(
   // have no basis to change was one screen that never changed an answer. The key
   // note names the flag for the people it is for.
   const baseUrl = flags.baseUrl ?? existingCredentials.baseUrl ?? DEFAULT_BASE_URL
+  // The MCP endpoint is the same: a private deployment's `--mcp-url`, else the one an
+  // earlier run saved, else the hosted one. It is saved ONLY when it is not the hosted
+  // one (`null` removes a saved one when the flag goes back to it), so a hosted user's
+  // credentials.json never carries the key.
+  const savedMcpUrl = existingCredentials.mcpUrl
+  const mcp: McpTarget = {
+    url: flags.mcpUrl ?? savedMcpUrl ?? HOSTED_MCP_URL,
+    // An earlier run's endpoint: an entry still on it is ours too, so going back to the
+    // hosted endpoint repoints it rather than leaving it on the private one.
+    prior: savedMcpUrl,
+    // An entry carrying the key saved here is ours too, whatever url it names. It is
+    // always re-keyed, but repointed only when the user named a deployment: `--mcp-url`
+    // (the hosted one included) or a saved mcpUrl. On the implicit hosted default it
+    // keeps its own url, and the run says so (`noteKept`).
+    savedApiKey: existingCredentials.apiKey,
+    repointKeyed: flags.mcpUrl !== undefined || savedMcpUrl !== undefined,
+  }
+  const mcpUrlWrite: string | null | undefined =
+    mcp.url !== HOSTED_MCP_URL ? mcp.url : flags.mcpUrl !== undefined ? null : undefined
+  // A saved mcpUrl this installer cannot use is a file it cannot safely read, so the
+  // run stops naming it, as for an unparseable file. Ignoring it would report the hosted
+  // endpoint while every surface still points at the old one. `--mcp-url` replaces it.
+  const savedProblem = flags.mcpUrl === undefined ? savedMcpUrlProblem(ports.readText(credsPath)) : null
+  if (savedProblem) {
+    const message = `the mcpUrl in ${credsPath} ${savedProblem}`
+    ports.stderr(`error: ${message}`)
+    ports.stderr("Nothing was written.")
+    return fail(ports, flags, {
+      code: "credentials-mcpurl-invalid",
+      message,
+      remedy: `fix or remove mcpUrl in ${credsPath}, or pass --mcp-url`,
+    })
+  }
+  if (isCleartextRemote(baseUrl)) {
+    plan.warnings.push(
+      `${baseUrl} is plain http to another machine: the API key crosses the network unencrypted, and if the ` +
+        'server redirects to https, clients drop the Authorization header and every request fails with 401 "Missing API key". ' +
+        "Use the https url",
+    )
+  }
+  if (isCleartextRemote(mcp.url)) {
+    plan.warnings.push(
+      `${mcp.url} is plain http to another machine: the API key in each tool's Authorization header ` +
+        "crosses the network unencrypted. Use https if the deployment has it",
+    )
+  }
 
   const credential = await resolveCredential(ports, flags, ui, {
     baseUrl,
@@ -514,14 +568,31 @@ async function drive(
     // Named from the ACTUAL selection: the note the user reads before pasting a
     // secret has to list the files this run will really put it in, not a count
     // that was right for some other selection.
-    keyFiles: keyTargetFiles(selected, ports, home, credsPath, tools),
+    keyFiles: keyTargetFiles(selected, ports, home, credsPath, tools, mcp.url),
   })
   if (credential.abort) {
     ports.stderr("Nothing was written.")
     return fail(ports, flags, credential.error ?? UNKNOWN_CREDENTIAL_ERROR)
   }
 
-  if (credential.apiKey) {
+  // credentials.json is written for a new key, AND when only the endpoints changed: a
+  // `--base-url` or `--mcp-url` on a run that kept the saved key (or has none) used to
+  // be dropped while the summary reported it. That path keeps the key in the file as it
+  // is, and touches a url only when a flag named it, so a plain re-run stages nothing.
+  // A run whose key the server refused (the interactive "Try a different key? → No")
+  // still saves the MCP endpoint: no key is saved, but the surfaces below point at it,
+  // or a later `--login` without the flag could not find them. It does NOT save its
+  // `--base-url`: the saved key was refused THERE, and every SDK would then send that
+  // key to a url that may be a typo.
+  // The same holds when the key could not be checked there and the user chose not to
+  // write it ("unverified-declined"): nothing vouches for that url either.
+  const baseUrlWrite = credential.apiKey
+    ? baseUrl
+    : credential.status === "rejected" || credential.status === "unverified-declined"
+      ? undefined
+      : flags.baseUrl
+  const endpointsOnly = !credential.apiKey && (baseUrlWrite !== undefined || mcpUrlWrite !== undefined)
+  if (credential.apiKey || endpointsOnly) {
     const credsSource = ports.readText(credsPath)
     // A present-but-unparseable credentials.json is NOT treated as empty (which would
     // rebuild it from only apiKey+baseUrl and discard its unknown keys) — it aborts
@@ -539,7 +610,7 @@ async function drive(
     }
     const contents = credentialsContents(
       existingCreds.status === "parsed" ? existingCreds.value : null,
-      { apiKey: credential.apiKey, baseUrl },
+      { ...(credential.apiKey ? { apiKey: credential.apiKey } : {}), baseUrl: baseUrlWrite, mcpUrl: mcpUrlWrite },
     )
     // A byte-identical rewrite is not a write. Re-running with the same key used to
     // stage credentials.json every time, so the summary said `wrote …` and the undo
@@ -547,16 +618,27 @@ async function drive(
     // changed. Every sibling editor already reports `unchanged` in this situation.
     if (contents !== credsSource) {
       const delta: string[] = []
-      if (existingCredentials.apiKey && existingCredentials.apiKey !== credential.apiKey) {
-        delta.push("the apiKey was replaced")
-      } else if (!existingCredentials.apiKey) delta.push("the apiKey was added")
-      if (existingCredentials.baseUrl && existingCredentials.baseUrl !== baseUrl) delta.push("baseUrl was changed")
+      if (credential.apiKey) {
+        if (existingCredentials.apiKey && existingCredentials.apiKey !== credential.apiKey) {
+          delta.push("the apiKey was replaced")
+        } else if (!existingCredentials.apiKey) delta.push("the apiKey was added")
+      }
+      if (baseUrlWrite !== undefined && existingCredentials.baseUrl && existingCredentials.baseUrl !== baseUrlWrite) {
+        delta.push("baseUrl was changed")
+      } else if (!credential.apiKey && !existingCredentials.baseUrl && baseUrlWrite !== undefined) {
+        delta.push("baseUrl was added")
+      }
+      if (typeof mcpUrlWrite === "string" && savedMcpUrl !== mcpUrlWrite) {
+        delta.push(rawMcpUrl(credsSource) !== undefined ? "mcpUrl was changed" : "mcpUrl was added")
+      } else if (mcpUrlWrite === null && rawMcpUrl(credsSource) !== undefined) delta.push("mcpUrl was removed")
       addFile(plan, {
         path: credsPath,
         contents,
         secret: true,
         created: credsSource === null,
-        reason: `store the API key for every surface (${maskKey(credential.apiKey)})`,
+        reason: credential.apiKey
+          ? `store the API key for every surface (${maskKey(credential.apiKey)})`
+          : "store the Telem deployment's urls for every surface (the API key in it is unchanged)",
         undo: undoLine(credsPath, credsSource === null, delta.join(", ") || undefined),
       })
     }
@@ -672,6 +754,9 @@ async function drive(
   // in this set: a network failure says nothing about the key, and that path keeps it.
   const surfaceApiKey =
     credential.status === "rejected" ? undefined : (credential.apiKey ?? existingCredentials.apiKey)
+  // A run that replaces the saved key: only then is an entry still holding the old one
+  // worth a word (`noteHeldKey`).
+  mcp.keyChanged = Boolean(credential.apiKey && existingCredentials.apiKey && credential.apiKey !== existingCredentials.apiKey)
   await planSurfaces(ports, flags, ui, {
     plan,
     selected,
@@ -679,12 +764,39 @@ async function drive(
     interactive,
     apiKey: surfaceApiKey,
     autoRouting: hostedRouting(answers.autoRouting ?? (existingUser as Record<string, unknown> | null)?.autoRouting),
+    mcp,
   })
+
+  // A private REST deployment with the hosted MCP endpoint: a tool left pointing at
+  // mcp.telem.ai sends this deployment's key there. Legitimate for a staging router, so a
+  // warning rather than a stop — but it names only the tools whose entry points at the
+  // hosted server AFTER this run (read from the plan), never one left on another url.
+  // A saved `https://router.telem.ai/` is the hosted router, not a private one.
+  if (baseUrl.replace(/\/+$/, "") !== DEFAULT_BASE_URL && mcp.url === HOSTED_MCP_URL) {
+    const names = hostedMcpSurfaces(ports, plan, home, selected, mcp).map((id) => surfaceById(id)?.label ?? id)
+    const parts = [
+      ...(names.length ? [`${names.join(", ")} will send your Telem key to the hosted MCP server`] : []),
+      ...(selected.includes("mcp-json") ? ["the printed snippet points at the hosted MCP server"] : []),
+    ]
+    if (parts.length) {
+      plan.warnings.push(
+        `the deployment is ${baseUrl}, but the MCP endpoint is the hosted ${HOSTED_MCP_URL}: ${parts.join(", and ")}. ` +
+          "If your deployment has its own MCP endpoint, re-run with --mcp-url <your MCP endpoint>",
+      )
+    }
+  }
 
   return finish(ports, flags, plan, {
     say,
     ui,
     baseUrl,
+    // What credentials.json holds after this run, when that is not the url this run used:
+    // a `--base-url` the key was refused at (or not written at) is not saved (above).
+    savedBaseUrl:
+      credential.status === "rejected" || credential.status === "unverified-declined"
+        ? (existingCredentials.baseUrl ?? DEFAULT_BASE_URL)
+        : baseUrl,
+    mcpUrl: mcp.url,
     credential,
     // The EFFECTIVE key actually threaded into surfaces and written inline (e.g. into
     // Codex's config.toml http_headers) — a freshly resolved one, else the kept key
@@ -782,6 +894,116 @@ type SurfaceContext = {
   /** The `X-Telem-Auto-Routing` value for the hosted MCP connection: the user's
    * effective answer when it is one the server accepts, else absent (no header). */
   autoRouting?: HostedRouting
+  /** The Telem MCP endpoint every hosted surface points at. */
+  mcp: McpTarget
+}
+
+/**
+ * Where the hosted surfaces point: `url` (`--mcp-url`, else the saved `mcpUrl`, else the
+ * hosted endpoint) and the endpoint an earlier run saved (`prior`). An entry on either,
+ * or on the hosted endpoint, is ours: repointed at `url` and re-keyed. Any other url is
+ * the user's own server and is left alone.
+ */
+type McpTarget = {
+  url: string
+  prior?: string
+  savedApiKey?: string
+  repointKeyed: boolean
+  /** This run replaces the saved key (set once the key is resolved). */
+  keyChanged?: boolean
+  /** The url Claude Code's telem plugin points at after this run, set by its planner
+   * (undefined when nothing was installed). */
+  claudeUrl?: string | null
+}
+
+/**
+ * A `telem` entry that is not ours stays as it is. When this install is on a private
+ * endpoint (or was, before), say so, naming the file: a tool still on another endpoint
+ * is otherwise invisible. The hosted-only run prints nothing new.
+ */
+function noteForeign(plan: Plan, id: SurfaceId, mcp: McpTarget, path: string, entry: string, foreignUrl: string | undefined): void {
+  if (!foreignUrl || (mcp.url === HOSTED_MCP_URL && mcp.prior === undefined)) return
+  plan.notes.push(
+    surfaceNote(
+      id,
+      `${entry} in ${path} points at ${foreignUrl}, which is not a Telem endpoint this installer set up, ` +
+        `so it was left as it is. To use ${mcp.url}, change its url by hand.`,
+    ),
+  )
+}
+
+/** An entry that still holds the saved key at a url that is not ours (`entryOwnership`):
+ * left alone, and named only on a run that replaces the key — the one moment that leaves
+ * it with a key the user may be about to revoke. A no-rotation run says nothing. */
+function noteHeldKey(plan: Plan, id: SurfaceId, mcp: McpTarget, path: string, entry: string, url: string | undefined): void {
+  if (!url || !mcp.keyChanged) return
+  plan.notes.push(
+    surfaceNote(
+      id,
+      `${entry} in ${path} points at ${url} and still holds your previous Telem key; this run leaves it alone. ` +
+        // Not a bare "re-run with --mcp-url": that also saves the url and repoints every
+        // other tool to it, which is right only if they all use that endpoint.
+        `If all your Telem tools use that endpoint, re-run with --mcp-url ${url}; ` +
+        "otherwise update its Authorization header by hand.",
+    ),
+  )
+}
+
+/**
+ * The selected MCP tools whose `telem` entry points at the hosted MCP after this run, read
+ * from what the plan stages (or the file as it stands): a tool left on another url, a
+ * stdio table, or one that failed is not among them. Claude Code's comes from its planner.
+ */
+function hostedMcpSurfaces(
+  ports: Ports,
+  plan: Plan,
+  home: string,
+  selected: readonly SurfaceId[],
+  mcp: McpTarget,
+): SurfaceId[] {
+  const final = (path: string) => plan.files.find((file) => file.path === path)?.contents ?? ports.readText(path)
+  const tomlUrl = (path: string) => {
+    const source = final(path)
+    const scan = source === null ? null : scanToml(source)
+    const telem = scan?.ok ? findTelemTable(scan.lines) : null
+    return scan?.ok && telem ? tableUrl(scan.lines, telem) : null
+  }
+  // Muse also reads the `mcp_servers` spelling (its editor renames it, but a file the
+  // plan does not write keeps it), so that one counts too.
+  const jsonUrl = (path: string, alsoSnake = false) => {
+    type Servers = { telem?: { url?: unknown } }
+    const file = safeJson(final(path)) as { mcpServers?: Servers; mcp_servers?: Servers } | null
+    const servers = file && typeof file === "object" ? (file.mcpServers ?? (alsoSnake ? file.mcp_servers : undefined)) : undefined
+    const url = servers?.telem?.url
+    return typeof url === "string" ? url : null
+  }
+  const urlOf: Partial<Record<SurfaceId, () => string | null>> = {
+    codex: () => tomlUrl(join(codexHomeDir(ports.env, home), "config.toml")),
+    grok: () => tomlUrl(grokConfigPath(grokHome(ports.env, home))),
+    muse: () => jsonUrl(museSettingsPath(museConfigDir(ports.env, home)), true),
+    vscode: () => jsonUrl(copilotMcpConfigPath(copilotHome(ports.env, home))),
+    cursor: () => jsonUrl(editorAgentSpec(ports, "cursor", home).mcpPath),
+    devin: () => jsonUrl(editorAgentSpec(ports, "devin", home).mcpPath),
+    "claude-code": () => mcp.claudeUrl ?? null,
+  }
+  return selected.filter((id) => {
+    const read = urlOf[id]
+    const outcome = plan.outcomes.find((entry) => entry.id === id)
+    return read !== undefined && outcome?.status !== "failed" && read() === HOSTED_MCP_URL
+  })
+}
+
+/** `mcpServers.telem.url` of a plugin manifest, or null. */
+function manifestUrl(source: string | null): string | null {
+  const file = safeJson(source) as { mcpServers?: { telem?: { url?: unknown } } } | null
+  const url = file && typeof file === "object" ? file.mcpServers?.telem?.url : undefined
+  return typeof url === "string" ? url : null
+}
+
+/** credentials.json's raw `mcpUrl`, whatever it holds; undefined when the file has none. */
+function rawMcpUrl(source: string | null): unknown {
+  const file = safeJson(source)
+  return file && typeof file === "object" && !Array.isArray(file) ? (file as Record<string, unknown>).mcpUrl : undefined
 }
 
 async function planSurfaces(
@@ -884,13 +1106,13 @@ async function planSurfaces(
         planOpencode(ports, plan, home)
         break
       case "claude-code":
-        await planClaudeCode(ports, flags, ui, plan, tools, home, context.apiKey)
+        await planClaudeCode(ports, flags, ui, plan, tools, home, context.apiKey, context.mcp)
         break
       case "codex":
-        await planCodex(ports, flags, ui, plan, home, tools, context.apiKey, context.autoRouting)
+        await planCodex(ports, flags, ui, plan, home, tools, context.apiKey, context.autoRouting, context.mcp)
         break
       case "grok":
-        await planGrok(ports, flags, ui, plan, home, context.apiKey, context.autoRouting)
+        await planGrok(ports, flags, ui, plan, home, context.apiKey, context.autoRouting, context.mcp)
         break
       case "pi":
         planPi(plan, tools)
@@ -902,14 +1124,14 @@ async function planSurfaces(
         planHermes(ports, plan, tools, home)
         break
       case "muse":
-        await planMuse(ports, flags, ui, plan, home, context.apiKey, context.autoRouting)
+        await planMuse(ports, flags, ui, plan, home, context.apiKey, context.autoRouting, context.mcp)
         break
       case "vscode":
-        planCopilot(ports, plan, home, context.apiKey, context.autoRouting)
+        planCopilot(ports, plan, home, context.apiKey, context.autoRouting, context.mcp)
         break
       case "cursor":
       case "devin":
-        planEditorAgent(ports, plan, home, editorAgentSpec(ports, id, home), context.apiKey, context.autoRouting)
+        planEditorAgent(ports, plan, home, editorAgentSpec(ports, id, home), context.apiKey, context.autoRouting, context.mcp)
         break
       case "claude-skill":
         planClaudeSkill(plan, tools)
@@ -930,7 +1152,7 @@ async function planSurfaces(
                 {
                   mcpServers: {
                     telem: {
-                      url: CODEX_URL,
+                      url: context.mcp.url,
                       headers: {
                         Authorization: "Bearer tlm_…",
                         ...(context.autoRouting ? { [ROUTING_HEADER]: context.autoRouting } : {}),
@@ -943,7 +1165,7 @@ async function planSurfaces(
               )}`,
           ),
         )
-        setOutcome(plan, id, "manual", "hosted snippet printed below")
+        setOutcome(plan, id, "manual", context.mcp.url === HOSTED_MCP_URL ? "hosted snippet printed below" : "snippet printed below")
         break
     }
   }
@@ -1035,6 +1257,7 @@ async function planClaudeCode(
   tools: Record<string, ToolInfo>,
   home: string,
   apiKey: string | undefined,
+  mcp: McpTarget,
 ): Promise<void> {
   const claude = tools.claude?.path
   // The folder Claude Code runs the plugin from: a copy outside the npx cache (claude.ts).
@@ -1181,6 +1404,15 @@ async function planClaudeCode(
   const update = ["claude", "plugin", "update", CLAUDE_PLUGIN_REF]
   if (registered.kind === "other") {
     plan.notes.push(surfaceNote("claude-code", `Claude Code uses the plugin from ${registered.from}; the installer left that as it is.`))
+    // That plugin's own manifest names the hosted server.
+    mcp.claudeUrl = HOSTED_MCP_URL
+    if (mcp.url !== HOSTED_MCP_URL) {
+      // That plugin's own manifest names the hosted server, and it is not ours to edit.
+      plan.warnings.push(
+        `Claude Code's telem plugin comes from ${registered.from}, whose MCP server is the hosted ${HOSTED_MCP_URL}; ` +
+          `the installer left it as it is, so Claude Code does not use ${mcp.url}`,
+      )
+    }
     plan.commands.push({
       surface: "claude-code",
       argv: update,
@@ -1193,18 +1425,56 @@ async function planClaudeCode(
 
   // The copy: every plugin file, unchanged, written over the old one only where it
   // differs. The folder is never removed, so the hook's own state there (window.json,
-  // config-notice.json) survives a re-run.
+  // config-notice.json) survives a re-run. The one exception is a private deployment:
+  // the copy's plugin.json then names its MCP endpoint (Claude Code reads that folder
+  // live, so the next session uses it). On the hosted endpoint the copy is the source's
+  // bytes, which also puts back a copy an earlier private run rewrote.
   let copied = false
   for (const file of pluginSource.files) {
     const path = join(copyDir, ...file.relative.split("/"))
+    let contents = file.contents as string
+    let repointed = false
+    if (file.relative === CLAUDE_PLUGIN_MANIFEST && mcp.url !== HOSTED_MCP_URL) {
+      const manifest = claudePluginManifestFor(contents, mcp.url)
+      if (manifest === null) {
+        plan.warnings.push(
+          `the telem plugin's ${CLAUDE_PLUGIN_MANIFEST} has no mcpServers.telem to point at ${mcp.url}; ` +
+            "it was copied as it is, so Claude Code uses the server it names",
+        )
+      } else {
+        repointed = manifest !== contents
+        contents = manifest
+      }
+    }
+    if (file.relative === CLAUDE_PLUGIN_MANIFEST) mcp.claudeUrl = manifestUrl(contents)
     const existing = ports.readText(path)
-    if (existing === file.contents) continue
+    if (existing === contents) continue
+    // A copy whose manifest was pointed elsewhere by hand is rewritten on the implicit
+    // hosted default, as it always was (the copy is the source's bytes). Say so, and how
+    // to keep that url, since the entry it replaces may be the only one that worked.
+    if (file.relative === CLAUDE_PLUGIN_MANIFEST && mcp.url === HOSTED_MCP_URL && !mcp.repointKeyed) {
+      const handUrl = manifestUrl(existing)
+      if (handUrl !== null && handUrl !== HOSTED_MCP_URL) {
+        plan.notes.push(
+          surfaceNote(
+            "claude-code",
+            `the plugin copy's ${CLAUDE_PLUGIN_MANIFEST} in ${copyDir} pointed at ${handUrl}; this run copies the ` +
+              `plugin's own manifest over it, so Claude Code uses ${HOSTED_MCP_URL}. To keep ${handUrl}, ` +
+              `re-run with --mcp-url ${handUrl}.`,
+          ),
+        )
+      }
+    }
     addFile(plan, {
       path,
-      contents: file.contents as string,
+      contents,
       secret: false,
       created: existing === null,
-      reason: "the telem Claude Code plugin (hosted MCP, lineage hooks and skill)",
+      reason: repointed
+        ? `the telem Claude Code plugin's manifest, with its MCP server at ${mcp.url}`
+        : mcp.url === HOSTED_MCP_URL
+          ? "the telem Claude Code plugin (hosted MCP, lineage hooks and skill)"
+          : `the telem Claude Code plugin (${mcpPhrase(mcp.url)}, lineage hooks and skill)`,
       undo: claudePluginUndoLine(copyDir),
     })
     copied = true
@@ -1225,7 +1495,10 @@ async function planClaudeCode(
   plan.commands.push({
     surface: "claude-code",
     argv: ["claude", "plugin", "install", CLAUDE_PLUGIN_REF],
-    reason: "install the telem Claude Code plugin (hosted MCP + lineage hook)",
+    reason:
+      mcp.url === HOSTED_MCP_URL
+        ? "install the telem Claude Code plugin (hosted MCP + lineage hook)"
+        : `install the telem Claude Code plugin (${mcpPhrase(mcp.url)} + lineage hook)`,
     optional: false,
   })
   if (registered.kind === "directory") {
@@ -1282,6 +1555,7 @@ async function planMuse(
   home: string,
   apiKey: string | undefined,
   autoRouting: HostedRouting | undefined,
+  mcp: McpTarget,
 ): Promise<void> {
   const configDir = museConfigDir(ports.env, home)
   const settingsPath = museSettingsPath(configDir)
@@ -1304,6 +1578,10 @@ async function planMuse(
     {
       apiKey,
       autoRouting,
+      mcpUrl: mcp.url,
+      priorMcpUrl: mcp.prior,
+      savedApiKey: mcp.savedApiKey,
+      repointKeyed: mcp.repointKeyed,
       disableWebSearch,
       hookCommand: hookFound
         ? `node "${join(configDir, "telem", MUSE_HOOK_FILE)}" "${museSessionsDir(ports.env, home)}"`
@@ -1316,6 +1594,8 @@ async function planMuse(
     setOutcome(plan, "muse", "failed", edit.reason)
     return
   }
+  noteForeign(plan, "muse", mcp, settingsPath, "mcpServers.telem", edit.foreignUrl)
+  noteHeldKey(plan, "muse", mcp, settingsPath, "mcpServers.telem", edit.heldKeyUrl)
 
   const changes: string[] = []
   if (edit.status === "write") {
@@ -1332,7 +1612,7 @@ async function planMuse(
       plan.notes.push(
         surfaceNote(
           "muse",
-          `mcpServers.telem points at the hosted ${MUSE_URL} but no API key was available to write. ` +
+          `mcpServers.telem points at ${mcpPhrase(mcp.url)} but no API key was available to write. ` +
             `Add "Authorization": "Bearer <your tlm_ key>" to its "headers" in ${settingsPath}.`,
         ),
       )
@@ -1431,6 +1711,7 @@ function planEditorAgent(
   spec: EditorAgentSpec,
   apiKey: string | undefined,
   autoRouting: HostedRouting | undefined,
+  mcp: McpTarget,
 ): void {
   const { id } = spec
   const sourceDir = resolveClaudePluginDir(ports)
@@ -1445,12 +1726,18 @@ function planEditorAgent(
     : null
   const hookFound = files !== null && files.every((file) => file.contents !== null)
 
-  const mcpEdit = planMcpJson(ports.readText(spec.mcpPath), { apiKey, autoRouting }, spec.mcpPath)
+  const mcpEdit = planMcpJson(
+    ports.readText(spec.mcpPath),
+    { apiKey, autoRouting, mcpUrl: mcp.url, priorMcpUrl: mcp.prior, savedApiKey: mcp.savedApiKey, repointKeyed: mcp.repointKeyed },
+    spec.mcpPath,
+  )
   if (mcpEdit.status === "unparseable") {
     plan.notes.push(surfaceNote(id, mcpEdit.reason))
     setOutcome(plan, id, "failed", mcpEdit.reason)
     return
   }
+  noteForeign(plan, id, mcp, spec.mcpPath, "mcpServers.telem", mcpEdit.foreignUrl)
+  noteHeldKey(plan, id, mcp, spec.mcpPath, "mcpServers.telem", mcpEdit.heldKeyUrl)
   const hookEdit = hookFound ? spec.planHook(ports.readText(spec.hookPath)) : ({ status: "unchanged" } as const)
   if (hookEdit.status === "unparseable") {
     plan.notes.push(surfaceNote(id, hookEdit.reason))
@@ -1473,7 +1760,7 @@ function planEditorAgent(
       plan.notes.push(
         surfaceNote(
           id,
-          `mcpServers.telem points at the hosted ${HOSTED_MCP_URL} but no API key was available to write. ` +
+          `mcpServers.telem points at ${mcpPhrase(mcp.url)} but no API key was available to write. ` +
             `Add "Authorization": "Bearer <your tlm_ key>" to its "headers" in ${spec.mcpPath}.`,
         ),
       )
@@ -1550,6 +1837,7 @@ function planCopilot(
   home: string,
   apiKey: string | undefined,
   autoRouting: HostedRouting | undefined,
+  mcp: McpTarget,
 ): void {
   const copilotDir = copilotHome(ports.env, home)
   const pluginDir = copilotPluginDir(home)
@@ -1564,12 +1852,18 @@ function planCopilot(
   const pluginFound = files !== null && files.every((file) => file.contents !== null)
 
   const mcpPath = copilotMcpConfigPath(copilotDir)
-  const mcpEdit = planCopilotMcpConfig(ports.readText(mcpPath), { apiKey, autoRouting }, mcpPath)
+  const mcpEdit = planCopilotMcpConfig(
+    ports.readText(mcpPath),
+    { apiKey, autoRouting, mcpUrl: mcp.url, priorMcpUrl: mcp.prior, savedApiKey: mcp.savedApiKey, repointKeyed: mcp.repointKeyed },
+    mcpPath,
+  )
   if (mcpEdit.status === "unparseable") {
     plan.notes.push(surfaceNote("vscode", mcpEdit.reason))
     setOutcome(plan, "vscode", "failed", mcpEdit.reason)
     return
   }
+  noteForeign(plan, "vscode", mcp, mcpPath, "mcpServers.telem", mcpEdit.foreignUrl)
+  noteHeldKey(plan, "vscode", mcp, mcpPath, "mcpServers.telem", mcpEdit.heldKeyUrl)
   const settingsPath = copilotSettingsPath(copilotDir)
   const settingsEdit = pluginFound
     ? planCopilotSettings(ports.readText(settingsPath), pluginDir, settingsPath)
@@ -1595,7 +1889,7 @@ function planCopilot(
       plan.notes.push(
         surfaceNote(
           "vscode",
-          `mcpServers.telem points at the hosted ${COPILOT_URL} but no API key was available to write. ` +
+          `mcpServers.telem points at ${mcpPhrase(mcp.url)} but no API key was available to write. ` +
             `Add "Authorization": "Bearer <your tlm_ key>" to its "headers" in ${mcpPath}.`,
         ),
       )
@@ -1659,6 +1953,7 @@ async function planCodex(
   tools: Record<string, ToolInfo>,
   apiKey: string | undefined,
   autoRouting: HostedRouting | undefined,
+  mcp: McpTarget,
 ): Promise<void> {
   const codexHome = codexHomeDir(ports.env, home)
   const configPath = join(codexHome, "config.toml")
@@ -1702,7 +1997,17 @@ async function planCodex(
 
   const edit = planCodexConfig(
     source,
-    { disableWebSearch, captureReasoning, apiKey, hookTrust, autoRouting },
+    {
+      disableWebSearch,
+      captureReasoning,
+      apiKey,
+      hookTrust,
+      autoRouting,
+      mcpUrl: mcp.url,
+      priorMcpUrl: mcp.prior,
+      savedApiKey: mcp.savedApiKey,
+      repointKeyed: mcp.repointKeyed,
+    },
     configPath,
   )
   if (edit.status === "abort") {
@@ -1710,6 +2015,8 @@ async function planCodex(
     setOutcome(plan, "codex", "failed", edit.reason)
     return
   }
+  noteForeign(plan, "codex", mcp, configPath, `[${CODEX_TABLE}]`, edit.foreignUrl)
+  noteHeldKey(plan, "codex", mcp, configPath, `[${CODEX_TABLE}]`, edit.heldKeyUrl)
 
   // The config.toml changes and the plugin's changes are kept apart, because the
   // summary row names ~/.codex/config.toml ONCE and hangs its edits off that, instead
@@ -1740,10 +2047,10 @@ async function planCodex(
         surfaceNote(
           "codex",
           edit.keyMalformed
-            ? `[${CODEX_TABLE}] points at the hosted ${CODEX_URL}, but the available API key did not look like a valid tlm_ key ` +
+            ? `[${CODEX_TABLE}] points at ${mcpPhrase(mcp.url)}, but the available API key did not look like a valid tlm_ key ` +
                 "(a real key is only letters, digits, `_` and `-`), so no auth header was written. " +
                 `Add \`http_headers = { Authorization = "Bearer <your tlm_ key>" }\` to that table in ${configPath} by hand.`
-            : `[${CODEX_TABLE}] points at the hosted ${CODEX_URL} but no API key was available to write. ` +
+            : `[${CODEX_TABLE}] points at ${mcpPhrase(mcp.url)} but no API key was available to write. ` +
                 `Add \`http_headers = { Authorization = "Bearer <your tlm_ key>" }\` to that table in ${configPath}.`,
         ),
       )
@@ -1843,10 +2150,16 @@ function codexDetail(configPath: string, configChanges: string[], pluginChanges:
  * and says in as many words that the existing table was left alone.
  */
 function codexUndoLine(
-  edit: { created: boolean; addedTable: boolean; reconciled: boolean; changes: string[] },
+  edit: { created: boolean; addedTable: boolean; reconciled: boolean; repointedFrom?: string | null; changes: string[] },
   configPath: string,
 ): string {
   if (edit.created) return undoLine(configPath, true)
+  if (edit.repointedFrom) {
+    return (
+      `in ${configPath}: set url back to "${edit.repointedFrom}" in [${CODEX_TABLE}]` +
+      (edit.reconciled ? " and restore your previous http_headers line there (its Telem auth header was brought in line with your current key)" : "")
+    )
+  }
   if (edit.reconciled) {
     return `restore your previous http_headers line in [${CODEX_TABLE}] in ${configPath} (its Telem auth header was brought in line with your current key)`
   }
@@ -1911,6 +2224,7 @@ async function planGrok(
   home: string,
   apiKey: string | undefined,
   autoRouting: HostedRouting | undefined,
+  mcp: McpTarget,
 ): Promise<void> {
   const grokDir = grokHome(ports.env, home)
   const configPath = grokConfigPath(grokDir)
@@ -1939,7 +2253,16 @@ async function planGrok(
 
   const edit = planGrokConfig(
     source,
-    { apiKey: apiKey ?? null, autoRouting: autoRouting ?? null, disableWebSearch, allowTelem },
+    {
+      apiKey: apiKey ?? null,
+      autoRouting: autoRouting ?? null,
+      disableWebSearch,
+      allowTelem,
+      mcpUrl: mcp.url,
+      priorMcpUrl: mcp.prior,
+      savedApiKey: mcp.savedApiKey,
+      repointKeyed: mcp.repointKeyed,
+    },
     configPath,
   )
   if (edit.status === "abort") {
@@ -1947,6 +2270,8 @@ async function planGrok(
     setOutcome(plan, "grok", "failed", edit.reason)
     return
   }
+  noteForeign(plan, "grok", mcp, configPath, `[${GROK_TABLE}]`, edit.foreignUrl)
+  noteHeldKey(plan, "grok", mcp, configPath, `[${GROK_TABLE}]`, edit.heldKeyUrl)
 
   const changes: string[] = []
   if (edit.status === "write") {
@@ -1965,10 +2290,10 @@ async function planGrok(
         surfaceNote(
           "grok",
           edit.keyMalformed
-            ? `[${GROK_TABLE}] points at the hosted ${GROK_URL}, but the available API key did not look like a valid tlm_ key, ` +
+            ? `[${GROK_TABLE}] points at ${mcpPhrase(mcp.url)}, but the available API key did not look like a valid tlm_ key, ` +
                 "so no auth header was written. " +
                 `Add \`headers = { Authorization = "Bearer <your tlm_ key>" }\` to that table in ${configPath} by hand.`
-            : `[${GROK_TABLE}] points at the hosted ${GROK_URL} but no API key was available to write. ` +
+            : `[${GROK_TABLE}] points at ${mcpPhrase(mcp.url)} but no API key was available to write. ` +
                 `Add \`headers = { Authorization = "Bearer <your tlm_ key>" }\` to that table in ${configPath}.`,
         ),
       )
@@ -2522,21 +2847,26 @@ export function keyTargetFiles(
   home: string,
   credsPath: string,
   tools: Record<string, ToolInfo>,
+  /** The MCP endpoint the key's Authorization headers are for; the hosted one by default. */
+  mcpUrl: string = HOSTED_MCP_URL,
 ): { path: string; why: string }[] {
   const files = [{ path: credsPath, why: "the credential home every surface falls back to" }]
+  // "the hosted Telem MCP", as it always read, or the private endpoint by name.
+  const authenticates =
+    mcpUrl === HOSTED_MCP_URL ? "the hosted Telem MCP authenticates every request" : `${mcpPhrase(mcpUrl)} authenticates every request`
   // Codex is unconditional: its config.toml edit does not depend on anything being
   // detected — the table is written whether or not `codex` is on PATH.
   if (selected.includes("codex")) {
     files.push({
       path: join(codexHomeDir(ports.env, home), "config.toml"),
-      why: `the Authorization header of [${CODEX_TABLE}] — the hosted Telem MCP authenticates every request`,
+      why: `the Authorization header of [${CODEX_TABLE}] — ${authenticates}`,
     })
   }
   // Grok Build's is unconditional too: the table is written whether or not `grok` is on PATH.
   if (selected.includes("grok")) {
     files.push({
       path: grokConfigPath(grokHome(ports.env, home)),
-      why: `the Authorization header of [${GROK_TABLE}] in Grok Build's config — the hosted Telem MCP authenticates every request`,
+      why: `the Authorization header of [${GROK_TABLE}] in Grok Build's config — ${authenticates}`,
     })
   }
   // Claude's is NOT. `planClaudeCode` stages settings.json only after both of its
@@ -2548,27 +2878,27 @@ export function keyTargetFiles(
   if (selected.includes("muse")) {
     files.push({
       path: museSettingsPath(museConfigDir(ports.env, home)),
-      why: "the Authorization header of mcpServers.telem — the hosted Telem MCP authenticates every request",
+      why: `the Authorization header of mcpServers.telem — ${authenticates}`,
     })
   }
   // Copilot's is unconditional too: mcp-config.json is written whether or not the plugin is found.
   if (selected.includes("vscode")) {
     files.push({
       path: copilotMcpConfigPath(copilotHome(ports.env, home)),
-      why: "the Authorization header of mcpServers.telem in GitHub Copilot's mcp-config.json — the hosted Telem MCP authenticates every request",
+      why: `the Authorization header of mcpServers.telem in GitHub Copilot's mcp-config.json — ${authenticates}`,
     })
   }
   // Cursor's and Devin's too: the MCP file is written whether or not the hook is found.
   if (selected.includes("cursor")) {
     files.push({
       path: cursorMcpPath(cursorHome(home)),
-      why: "the Authorization header of mcpServers.telem in Cursor's mcp.json — the hosted Telem MCP authenticates every request",
+      why: `the Authorization header of mcpServers.telem in Cursor's mcp.json — ${authenticates}`,
     })
   }
   if (selected.includes("devin")) {
     files.push({
       path: devinMcpPath(devinConfigDir(ports.env, home, ports.platform)),
-      why: "the Authorization header of mcpServers.telem in Devin's mcp_config.json — the hosted Telem MCP authenticates every request",
+      why: `the Authorization header of mcpServers.telem in Devin's mcp_config.json — ${authenticates}`,
     })
   }
   if (selected.includes("claude-code") && claudePluginConfigApplies(ports, tools)) {
@@ -2943,6 +3273,9 @@ async function finish(
     say: (line: string) => void
     ui: Ui | null
     baseUrl: string
+    /** The baseUrl credentials.json is left with; `baseUrl` when this run saved its own. */
+    savedBaseUrl: string
+    mcpUrl: string
     credential: CredentialOutcome
     /** The key actually written into surfaces (`credential.apiKey ?? existing`). */
     effectiveApiKey?: string
@@ -2981,10 +3314,18 @@ async function finish(
     ok: true,
     mode: context.interactive ? "interactive" : "flags",
     dryRun: flags.dryRun,
-    baseUrl: context.baseUrl,
+    // The SAVED deployment: what every later run and every SDK uses. A run that tried
+    // another one and did not save it says so in `attemptedBaseUrl`, only then.
+    baseUrl: context.savedBaseUrl,
+    ...(context.savedBaseUrl !== context.baseUrl ? { attemptedBaseUrl: context.baseUrl } : {}),
+    mcpUrl: context.mcpUrl,
     credentials: {
       status: context.credential.status,
-      path: context.credential.apiKey ? context.credsPath : undefined,
+      // Named whenever this run writes the file — an endpoints-only write included.
+      path:
+        context.credential.apiKey || plan.files.some((file) => file.path === context.credsPath)
+          ? context.credsPath
+          : undefined,
       masked: context.credential.apiKey ? maskKey(context.credential.apiKey) : undefined,
     },
     files: plan.files.map((file) => ({

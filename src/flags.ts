@@ -5,6 +5,7 @@
 // Pure: no process, no env, no IO. `parseFlags` never throws; it returns errors so
 // the caller can print all of them at once instead of one per run.
 
+import { mcpUrlProblem } from "./credentials.ts"
 import { OFF_VALUE, SUGGESTIONS } from "./interview.ts"
 import type { SurfaceId } from "./surfaces.ts"
 import { SURFACE_ALIASES, SURFACE_IDS } from "./surfaces.ts"
@@ -17,6 +18,9 @@ export type Flags = {
   clients: SurfaceId[]
   login: boolean
   baseUrl?: string
+  /** The Telem MCP endpoint every hosted surface points at, used verbatim (a private
+   * deployment's own). Absent means the flag was not passed. */
+  mcpUrl?: string
   keyEnv?: string
   /** A routing mode to write, or "off" to remove one. Absent means the flag was not passed. */
   autoRouting?: string
@@ -70,7 +74,13 @@ const EMPTY: Flags = {
 }
 
 /** Flags that take a value, in both `--flag value` and `--flag=value` spellings. */
-const VALUE_FLAGS = new Set(["--client", "--base-url", "--key-env", "--auto-routing"])
+const VALUE_FLAGS = new Set(["--client", "--base-url", "--mcp-url", "--key-env", "--auto-routing"])
+
+
+/** A value JSON-quoted, with DEL and the C1 controls escaped too (JSON leaves them raw). */
+function quoted(value: string): string {
+  return JSON.stringify(value).replace(/[\u007f-\u009f]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)
+}
 
 export function parseFlags(argv: readonly string[]): ParsedFlags {
   const flags: Flags = { ...EMPTY, clients: [] }
@@ -117,6 +127,18 @@ export function parseFlags(argv: readonly string[]): ParsedFlags {
           errors.push(`--base-url must be an http(s) URL; got ${value}`)
         } else {
           flags.baseUrl = trimmed
+        }
+      } else if (name === "--mcp-url") {
+        // Used as given: no `/mcp` is appended, because a private deployment names its
+        // own path. Only a trailing slash goes, the --base-url rule.
+        const trimmed = value.trim().replace(/\/+$/, "")
+        const problem = mcpUrlProblem(trimmed)
+        if (problem) {
+          // Never echo a value that carries a password; any other is shown JSON-quoted,
+          // so a control character is visible rather than sent to the terminal.
+          errors.push(problem.includes("password") ? `--mcp-url ${problem}` : `--mcp-url ${problem}; got ${quoted(value)}`)
+        } else {
+          flags.mcpUrl = trimmed
         }
       } else if (name === "--auto-routing") {
         const trimmed = value.trim().toLowerCase()
@@ -264,6 +286,9 @@ Flags (they double as the non-interactive API):
   --login                       use a new key even if one is saved: verify it, save
                                 it, and give it to every tool this run sets up
   --base-url <url>              Telem deployment to configure and verify against
+  --mcp-url <url>               Telem MCP endpoint every hosted tool points at, used
+                                as given (e.g. https://mcp.example.com/mcp); for a
+                                private deployment. Saved, so later runs keep it
   --key-env <VAR>               read the API key from this environment variable
                                 instead of prompting (the CI path)
   --auto-routing <mode>         let Telem choose the providers for each search:

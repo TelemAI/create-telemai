@@ -3,7 +3,11 @@
 //
 // Three things happen for Claude Code, and the KEY is in no command:
 //
-//  * The plugin is COPIED, unchanged, to `~/.telem/plugins/claude-plugin-telem`.
+//  * The plugin is COPIED to `~/.telem/plugins/claude-plugin-telem` — unchanged, except
+//    that for a private deployment (`--mcp-url`, or an `mcpUrl` an earlier run saved)
+//    the COPY's `.claude-plugin/plugin.json` gets `mcpServers.telem.url` set to that
+//    endpoint (`claudePluginManifestFor`). On the hosted endpoint the copy is byte-
+//    identical to the source, and a re-run back on it restores that.
 //    Claude Code runs a directory-sourced plugin IN PLACE from the folder its
 //    marketplace names; the copy it keeps under `~/.claude/plugins/cache/` is not used
 //    (live check, Claude Code 2.1.317, 2026-11-03). Under `npx` this package's own
@@ -70,8 +74,37 @@ export function claudePluginCopyDir(home: string): string {
   return join(home, ".telem", "plugins", CLAUDE_PLUGIN_DIRNAME)
 }
 
-/** The plugin files the run planner copies, relative to the plugin root, unchanged: every
- * manifest, hook and skill file. Not the tests or the docs, and not the hook's own state
+/** The manifest whose copy carries the MCP server's url. */
+export const CLAUDE_PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
+
+/**
+ * The plugin manifest for the copy, with `mcpServers.telem.url` set to `mcpUrl`. The
+ * source is re-serialized in its own indentation (and keeps or omits its final newline
+ * as it had it); every other key, and the order of all of them, stays. Null when the
+ * source is not a JSON object with a `mcpServers.telem` object: the caller then copies
+ * it as it is and says the endpoint could not be set.
+ */
+export function claudePluginManifestFor(source: string, mcpUrl: string): string | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(source.replace(/^\uFEFF/, ""))
+  } catch {
+    return null
+  }
+  const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v)
+  if (!isObj(parsed) || !isObj(parsed.mcpServers) || !isObj(parsed.mcpServers.telem)) return null
+  if (parsed.mcpServers.telem.url === mcpUrl) return source
+  parsed.mcpServers.telem.url = mcpUrl
+  const indent = /^[ \t]+(?=")/m.exec(source)?.[0] ?? "  "
+  // Keep the source's line endings too: a Windows checkout (git autocrlf) has CRLF.
+  // JSON.stringify escapes newlines inside strings, so only structural ones change.
+  const eol = source.includes("\r\n") ? "\r\n" : "\n"
+  const body = JSON.stringify(parsed, null, indent).replace(/\n/g, eol)
+  return `${body}${source.endsWith("\n") ? eol : ""}`
+}
+
+/** The plugin files the run planner copies, relative to the plugin root: every manifest,
+ * hook and skill file, unchanged but for the manifest's url on a private deployment. Not the tests or the docs, and not the hook's own state
  * (`window.json`, `config-notice.json`), which the copy leaves where it is. */
 export const CLAUDE_PLUGIN_FILES = [
   ".claude-plugin/marketplace.json",

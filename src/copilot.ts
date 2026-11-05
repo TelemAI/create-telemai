@@ -37,7 +37,7 @@
 
 import { join } from "node:path"
 
-import { CODEX_URL, ROUTING_HEADER, type HostedRouting } from "./codex.ts"
+import { CODEX_URL, ROUTING_HEADER, addServerChange, entryOwnership, headersBearer, isTelemMcpUrl, type HostedRouting } from "./codex.ts"
 
 /** The hosted Telem MCP endpoint — the one every hosted surface points at. */
 export const COPILOT_URL = CODEX_URL
@@ -89,7 +89,9 @@ function parse(source: string | null): Json | null | "unparseable" {
 }
 
 export type CopilotMcpConfigEdit =
-  | { status: "unchanged" }
+  /** `foreignUrl`: the telem entry points at a url that is not ours; `heldKeyUrl`: it also
+   * carries the saved key. Each set only then. */
+  | { status: "unchanged"; foreignUrl?: string; heldKeyUrl?: string }
   | {
       status: "write"
       contents: string
@@ -99,6 +101,13 @@ export type CopilotMcpConfigEdit =
       addedServer: boolean
       /** An existing hosted entry had its Authorization/routing headers updated. */
       reconciled: boolean
+      /** An existing entry of ours pointed at another Telem endpoint and now points at
+       * this run's `mcpUrl`; the url it had, for the undo line. Null otherwise. */
+      repointedFrom: string | null
+      /** The telem entry points at a url that is not ours, so it was left alone (set only then). */
+      foreignUrl?: string
+      /** The entry carries the saved key at a url that is not ours (set only then). */
+      heldKeyUrl?: string
       /** The telem entry has no key to authenticate with; the run must say so. */
       keyless: boolean
     }
@@ -115,9 +124,21 @@ function headersFor(apiKey: string | undefined, routing: HostedRouting | undefin
 /** The `mcpServers.telem` edit of Copilot's mcp-config.json. Pure: source in, edit out. */
 export function planCopilotMcpConfig(
   source: string | null,
-  input: { apiKey: string | undefined; autoRouting: HostedRouting | undefined },
+  input: {
+    apiKey: string | undefined
+    autoRouting: HostedRouting | undefined
+    /** The Telem MCP endpoint to point at; absent → the hosted one. */
+    mcpUrl?: string
+    /** The endpoint an earlier run saved, so an entry still on it counts as ours. */
+    priorMcpUrl?: string
+    /** The key saved in credentials.json: an entry carrying it is ours whatever its url. */
+    savedApiKey?: string
+    /** Repoint an entry that is ours only by its key (`entryOwnership`). */
+    repointKeyed?: boolean
+  },
   path: string,
 ): CopilotMcpConfigEdit {
+  const mcpUrl = input.mcpUrl ?? COPILOT_URL
   const file = parse(source)
   if (file === "unparseable") {
     return { status: "unparseable", reason: `${path} is not a JSON object; fix or move it, then re-run` }
@@ -128,16 +149,36 @@ export function planCopilotMcpConfig(
   }
   const servers = { ...((out.mcpServers ?? {}) as Json) }
   const telem = servers.telem
+  // The saved endpoint, and this entry's own url when it carries the saved key.
+  const own = entryOwnership(
+    { url: isObj(telem) ? telem.url : undefined, bearer: isObj(telem) ? headersBearer(telem.headers) : null },
+    { ...input, mcpUrl },
+  )
+  const prior = own.prior
+  const heldKeyUrl = own.heldKeyUrl
+  const foreignUrl =
+    isObj(telem) && typeof telem.url === "string" && !isTelemMcpUrl(telem.url, mcpUrl, prior) ? telem.url : null
   const wanted = headersFor(input.apiKey, input.autoRouting)
   const changes: string[] = []
   let addedServer = false
   let reconciled = false
+  let repointedFrom: string | null = null
   if (telem === undefined) {
-    servers.telem = { type: "http", url: COPILOT_URL, headers: wanted }
+    servers.telem = { type: "http", url: mcpUrl, headers: wanted }
     out.mcpServers = servers
     addedServer = true
-    changes.push("add the hosted telem MCP server")
-  } else if (isObj(telem) && telem.url === COPILOT_URL) {
+    changes.push(addServerChange(mcpUrl))
+  } else if (isObj(telem) && isTelemMcpUrl(telem.url, mcpUrl, prior)) {
+    // Ours on another Telem endpoint (the hosted default, or the one an earlier run
+    // saved): point it at this run's. Every other key of the entry stays.
+    let entry: Json = telem
+    if (telem.url !== mcpUrl) {
+      repointedFrom = telem.url as string
+      entry = { ...telem, url: mcpUrl }
+      servers.telem = entry
+      out.mcpServers = servers
+      changes.push(`point the telem server at ${mcpUrl} (was ${repointedFrom})`)
+    }
     // Only the headers this run writes move, whatever their case; any other header keeps
     // its value, and so does the routing header when this run has no routing answer.
     const prior = isObj(telem.headers) ? telem.headers : {}
@@ -149,7 +190,7 @@ export function planCopilotMcpConfig(
     }
     for (const [name, value] of Object.entries(wanted)) if (!(name in next)) next[name] = value
     if (JSON.stringify(next) !== JSON.stringify(prior)) {
-      servers.telem = { ...telem, headers: next }
+      servers.telem = { ...entry, headers: next }
       out.mcpServers = servers
       reconciled = true
       changes.push("update the telem server's headers")
@@ -158,9 +199,11 @@ export function planCopilotMcpConfig(
   const finalTelem = (out.mcpServers as Json | undefined)?.telem
   const keyless =
     isObj(finalTelem) &&
-    finalTelem.url === COPILOT_URL &&
+    isTelemMcpUrl(finalTelem.url, mcpUrl, prior) &&
     !Object.keys(isObj(finalTelem.headers) ? finalTelem.headers : {}).some((name) => name.toLowerCase() === "authorization")
-  if (!changes.length) return { status: "unchanged" }
+  if (!changes.length) {
+    return { status: "unchanged", ...(foreignUrl !== null ? { foreignUrl } : {}), ...(heldKeyUrl !== null ? { heldKeyUrl } : {}) }
+  }
   return {
     status: "write",
     contents: `${JSON.stringify(out, null, 2)}\n`,
@@ -168,7 +211,10 @@ export function planCopilotMcpConfig(
     changes,
     addedServer,
     reconciled,
+    repointedFrom,
     keyless,
+    ...(foreignUrl !== null ? { foreignUrl } : {}),
+    ...(heldKeyUrl !== null ? { heldKeyUrl } : {}),
   }
 }
 
@@ -289,12 +335,13 @@ export function copilotUserHooks(pluginDir: string): string {
 
 /** How to put mcp-config.json back: one step per change this run made. */
 export function copilotMcpUndoLine(
-  edit: { created: boolean; addedServer: boolean; reconciled: boolean },
+  edit: { created: boolean; addedServer: boolean; reconciled: boolean; repointedFrom?: string | null },
   path: string,
 ): string {
   if (edit.created) return `rm ${path}`
   const steps: string[] = []
   if (edit.addedServer) steps.push("remove mcpServers.telem")
+  if (edit.repointedFrom) steps.push(`set mcpServers.telem.url back to ${edit.repointedFrom}`)
   if (edit.reconciled) steps.push("restore your previous headers in mcpServers.telem")
   return `in ${path}: ${steps.length ? steps.join("; ") : "undo the edits listed above"}`
 }

@@ -6,9 +6,9 @@
 // with this run, every other header kept; a custom url is never touched. The file is the host's:
 // every other key is preserved, and one that does not parse as a JSON object is refused.
 
-import { CODEX_URL, ROUTING_HEADER, type HostedRouting } from "./codex.ts"
+import { CODEX_URL, ROUTING_HEADER, addServerChange, entryOwnership, headersBearer, isTelemMcpUrl, type HostedRouting } from "./codex.ts"
 
-/** The hosted Telem MCP endpoint — the one every hosted surface points at. */
+/** The hosted Telem MCP endpoint — the one every hosted surface points at by default. */
 export const HOSTED_MCP_URL = CODEX_URL
 
 export type Json = Record<string, unknown>
@@ -28,7 +28,9 @@ export function parseJsonObject(source: string | null): Json | null | "unparseab
 }
 
 export type McpJsonEdit =
-  | { status: "unchanged" }
+  /** `foreignUrl`: the telem entry points at a url that is not ours; `heldKeyUrl`: it also
+   * carries the saved key. Each set only then. */
+  | { status: "unchanged"; foreignUrl?: string; heldKeyUrl?: string }
   | {
       status: "write"
       contents: string
@@ -38,6 +40,13 @@ export type McpJsonEdit =
       addedServer: boolean
       /** An existing hosted entry had its Authorization/routing headers updated. */
       reconciled: boolean
+      /** An existing entry of ours pointed at another Telem endpoint and now points at
+       * this run's `mcpUrl`; the url it had, for the undo line. Null otherwise. */
+      repointedFrom: string | null
+      /** The telem entry points at a url that is not ours, so it was left alone (set only then). */
+      foreignUrl?: string
+      /** The entry carries the saved key at a url that is not ours (set only then). */
+      heldKeyUrl?: string
       /** The telem entry has no key to authenticate with; the run must say so. */
       keyless: boolean
     }
@@ -55,9 +64,21 @@ function headersFor(apiKey: string | undefined, routing: HostedRouting | undefin
  * new hosted server (both hosts infer the HTTP transport from `url`). */
 export function planMcpJson(
   source: string | null,
-  input: { apiKey: string | undefined; autoRouting: HostedRouting | undefined },
+  input: {
+    apiKey: string | undefined
+    autoRouting: HostedRouting | undefined
+    /** The Telem MCP endpoint to point at; absent → the hosted one. */
+    mcpUrl?: string
+    /** The endpoint an earlier run saved, so an entry still on it counts as ours. */
+    priorMcpUrl?: string
+    /** The key saved in credentials.json: an entry carrying it is ours whatever its url. */
+    savedApiKey?: string
+    /** Repoint an entry that is ours only by its key (`entryOwnership`). */
+    repointKeyed?: boolean
+  },
   path: string,
 ): McpJsonEdit {
+  const mcpUrl = input.mcpUrl ?? HOSTED_MCP_URL
   const file = parseJsonObject(source)
   if (file === "unparseable") {
     return { status: "unparseable", reason: `${path} is not a JSON object; fix or move it, then re-run` }
@@ -68,16 +89,36 @@ export function planMcpJson(
   }
   const servers = { ...((out.mcpServers ?? {}) as Json) }
   const telem = servers.telem
+  // The saved endpoint, and this entry's own url when it carries the saved key.
+  const own = entryOwnership(
+    { url: isObj(telem) ? telem.url : undefined, bearer: isObj(telem) ? headersBearer(telem.headers) : null },
+    { ...input, mcpUrl },
+  )
+  const prior = own.prior
+  const heldKeyUrl = own.heldKeyUrl
+  const foreignUrl =
+    isObj(telem) && typeof telem.url === "string" && !isTelemMcpUrl(telem.url, mcpUrl, prior) ? telem.url : null
   const wanted = headersFor(input.apiKey, input.autoRouting)
   const changes: string[] = []
   let addedServer = false
   let reconciled = false
+  let repointedFrom: string | null = null
   if (telem === undefined) {
-    servers.telem = { url: HOSTED_MCP_URL, headers: wanted }
+    servers.telem = { url: mcpUrl, headers: wanted }
     out.mcpServers = servers
     addedServer = true
-    changes.push("add the hosted telem MCP server")
-  } else if (isObj(telem) && telem.url === HOSTED_MCP_URL) {
+    changes.push(addServerChange(mcpUrl))
+  } else if (isObj(telem) && isTelemMcpUrl(telem.url, mcpUrl, prior)) {
+    // Ours on another Telem endpoint (the hosted default, or the one an earlier run
+    // saved): point it at this run's. Every other key of the entry stays.
+    let entry: Json = telem
+    if (telem.url !== mcpUrl) {
+      repointedFrom = telem.url as string
+      entry = { ...telem, url: mcpUrl }
+      servers.telem = entry
+      out.mcpServers = servers
+      changes.push(`point the telem server at ${mcpUrl} (was ${repointedFrom})`)
+    }
     // Only the headers this run writes move, whatever their case; any other header keeps
     // its value, and so does the routing header when this run has no routing answer.
     const prior = isObj(telem.headers) ? telem.headers : {}
@@ -89,7 +130,7 @@ export function planMcpJson(
     }
     for (const [name, value] of Object.entries(wanted)) if (!(name in next)) next[name] = value
     if (JSON.stringify(next) !== JSON.stringify(prior)) {
-      servers.telem = { ...telem, headers: next }
+      servers.telem = { ...entry, headers: next }
       out.mcpServers = servers
       reconciled = true
       changes.push("update the telem server's headers")
@@ -98,9 +139,11 @@ export function planMcpJson(
   const finalTelem = (out.mcpServers as Json | undefined)?.telem
   const keyless =
     isObj(finalTelem) &&
-    finalTelem.url === HOSTED_MCP_URL &&
+    isTelemMcpUrl(finalTelem.url, mcpUrl, prior) &&
     !Object.keys(isObj(finalTelem.headers) ? finalTelem.headers : {}).some((name) => name.toLowerCase() === "authorization")
-  if (!changes.length) return { status: "unchanged" }
+  if (!changes.length) {
+    return { status: "unchanged", ...(foreignUrl !== null ? { foreignUrl } : {}), ...(heldKeyUrl !== null ? { heldKeyUrl } : {}) }
+  }
   return {
     status: "write",
     contents: `${JSON.stringify(out, null, 2)}\n`,
@@ -108,15 +151,22 @@ export function planMcpJson(
     changes,
     addedServer,
     reconciled,
+    repointedFrom,
     keyless,
+    ...(foreignUrl !== null ? { foreignUrl } : {}),
+    ...(heldKeyUrl !== null ? { heldKeyUrl } : {}),
   }
 }
 
 /** How to put the file back: one step per change this run made. */
-export function mcpJsonUndoLine(edit: { created: boolean; addedServer: boolean; reconciled: boolean }, path: string): string {
+export function mcpJsonUndoLine(
+  edit: { created: boolean; addedServer: boolean; reconciled: boolean; repointedFrom?: string | null },
+  path: string,
+): string {
   if (edit.created) return `rm ${path}`
   const steps: string[] = []
   if (edit.addedServer) steps.push("remove mcpServers.telem")
+  if (edit.repointedFrom) steps.push(`set mcpServers.telem.url back to ${edit.repointedFrom}`)
   if (edit.reconciled) steps.push("restore your previous headers in mcpServers.telem")
   return `in ${path}: ${steps.length ? steps.join("; ") : "undo the edits listed above"}`
 }
