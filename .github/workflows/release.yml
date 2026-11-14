@@ -1,4 +1,6 @@
-# Publish to npm when a version tag is pushed.
+# Publish to npm when a version tag is pushed: @telemai/create, and @telemai/create-hack
+# (the same build with the hackathon stack as its default, scripts/hack-package.mjs) at
+# the same version.
 #
 # The tag is the trigger and the version is the package's own: the guard below refuses
 # a tag that disagrees with package.json, because a mis-tagged release cannot be undone
@@ -40,23 +42,38 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      - run: node scripts/hack-package.mjs
       - run: node scripts/smoke.mjs
       # A prerelease must NOT become `latest`. `npm publish` applies the `latest`
       # dist-tag to whatever it uploads unless told otherwise, so `0.2.5-rc.0` would
       # land on every `npm install` with no version pinned. Anything with a hyphen in
       # its version goes to `next` instead, which is what makes a release rehearsal
       # safe: it publishes for real, and nobody gets it by accident.
+      #
+      # Two packages, one tag. @telemai/create-hack goes first: a token that cannot
+      # create that name then fails the run before @telemai/create is out. A version
+      # already on the registry is skipped rather than failed, so a re-run after a
+      # half-failed release publishes the rest.
       - name: publish
         run: |
           version="$(node -p "require('./package.json').version")"
-          if [ "${{ steps.tag.outputs.dry }}" = "true" ]; then
-            npm publish --dry-run
-            echo "REHEARSAL: $version was packed and validated, nothing was uploaded"
-            exit 0
-          fi
           case "$version" in
-            *-*) npm publish --tag next && echo "published $version under dist-tag: next" ;;
-            *)   npm publish && echo "published $version under dist-tag: latest" ;;
+            *-*) tag=next ;;
+            *)   tag=latest ;;
           esac
+          for dir in ./hack-package .; do
+            name="$(node -p "require('$dir/package.json').name")"
+            if [ "${{ steps.tag.outputs.dry }}" = "true" ]; then
+              npm publish --dry-run "$dir"
+              echo "REHEARSAL: $name@$version was packed and validated, nothing was uploaded"
+              continue
+            fi
+            if [ "$(npm view "$name@$version" version 2>/dev/null)" = "$version" ]; then
+              echo "$name@$version is already published; skipped"
+              continue
+            fi
+            npm publish --tag "$tag" "$dir"
+            echo "published $name@$version under dist-tag: $tag"
+          done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

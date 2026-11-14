@@ -21,4 +21,18 @@ for (const manifest of [
   assert.ok(existsSync(manifest), `${manifest} is missing — the packaged plugin copy did not travel`)
 }
 
+// @telemai/create-hack, when it has been staged (scripts/hack-package.mjs): the same
+// checks, and its defaults are the hackathon stack's.
+if (existsSync("hack-package")) {
+  const hackHelp = execFileSync(process.execPath, ["hack-package/dist/index.js", "--help"], { encoding: "utf8" })
+  assert.match(hackHelp, /sets up https:\/\/hack\.telem\.ai\/api/, "the hack build does not default to the hack stack")
+  for (const manifest of [
+    "hack-package/plugins/claude-plugin-telem/.claude-plugin/plugin.json",
+    "hack-package/plugins/codex-plugin-telem/.codex-plugin/plugin.json",
+  ]) {
+    assert.ok(existsSync(manifest), `${manifest} is missing from @telemai/create-hack`)
+  }
+  console.log("ok: @telemai/create-hack runs with the hack defaults, and carries both plugins")
+}
+
 console.log("ok: @telemai/create runs, and both marketplace plugins are packaged")

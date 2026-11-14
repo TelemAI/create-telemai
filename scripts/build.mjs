@@ -9,19 +9,26 @@
 // run still never evaluates it.
 
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import { parseArgs } from "node:util"
 
 import { build } from "esbuild"
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const outfile = join(root, "dist", "index.js")
+
+// `--preset <name> --outdir <dir>`: the same sources with a preset's defaults
+// (src/preset.ts), into another package's dist/ (scripts/hack-package.mjs). Without
+// them this is the plain `@telemai/create` build into ./dist.
+const { values: args } = parseArgs({ options: { preset: { type: "string" }, outdir: { type: "string" } } })
+const distDir = args.outdir ? resolve(args.outdir) : join(root, "dist")
+const outfile = join(distDir, "index.js")
 
 // Emptied first, never merged into: `files` publishes this directory whole, so
 // anything a previous build left here rides into the tarball. That is not theoretical
 // — the module list this script used to write into dist/ shipped that way.
-rmSync(join(root, "dist"), { recursive: true, force: true })
-mkdirSync(join(root, "dist"), { recursive: true })
+rmSync(distDir, { recursive: true, force: true })
+mkdirSync(distDir, { recursive: true })
 
 const result = await build({
   entryPoints: [join(root, "src", "index.ts")],
@@ -36,6 +43,8 @@ const result = await build({
   minifySyntax: true,
   legalComments: "none",
   metafile: true,
+  // Only a preset build defines it; src/preset.ts reads it through `typeof`.
+  ...(args.preset ? { define: { __TELEM_PRESET__: JSON.stringify(args.preset) } } : {}),
 })
 
 chmodSync(outfile, 0o755)

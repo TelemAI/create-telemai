@@ -15,10 +15,11 @@ import { fileURLToPath } from "node:url"
 import { codexPluginContentHash } from "./codex-plugin.ts"
 import { exec, openUrl } from "./exec.ts"
 import { existsSync, readTextSync } from "./fsops.ts"
+import { BUILD_PRESET } from "./preset.ts"
 import { run } from "./run.ts"
 import { loadClackUi } from "./ui.ts"
 
-export const VERSION = "0.1.31"
+export const VERSION = "0.1.32"
 
 /** Where `scripts/copy-plugins.mjs` puts the plugin packages inside this one. */
 export const PACKAGED_PLUGINS_DIR = "plugins"
@@ -102,6 +103,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     openUrl,
     fetchImpl: (input, init) => fetch(input, init),
     loadUi: loadClackUi,
+    preset: BUILD_PRESET,
     claudePluginDir: resolveClaudePluginDir(),
     codexPluginDir: resolveCodexPluginDir(),
     pluginContentHash: codexPluginContentHash,

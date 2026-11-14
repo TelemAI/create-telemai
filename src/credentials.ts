@@ -26,6 +26,25 @@
 // auth this probe would misread a bad key as good, so the contract is load-bearing.
 export const DEFAULT_BASE_URL = "https://router.telem.ai"
 export const CONSOLE_URL = "https://app.telem.ai"
+
+/**
+ * The console that issues keys for the deployment at `baseUrl`.
+ *
+ * One rule: a deployment served from one host, with its API at `https://<host>/api`,
+ * has its console at `https://<host>`. Every other base URL, the hosted router
+ * included, gets the hosted console. Without this, a run against such a deployment
+ * opened the hosted console, the user created a key there, and the deployment then
+ * refused it as an invalid key.
+ */
+export function consoleUrlFor(baseUrl: string): string {
+  try {
+    const url = new URL(baseUrl)
+    if (url.pathname.replace(/\/+$/, "") === "/api") return url.origin
+  } catch {
+    // not a URL: the hosted console, as before
+  }
+  return CONSOLE_URL
+}
 export const VERIFY_PATH = "/v1/search"
 // A body that authenticates but is refused before search: the retired V1 field
 // makes the request a guaranteed 422 on any valid key, so no provider is billed.
@@ -142,7 +161,7 @@ export async function verifyKey(input: VerifyInput): Promise<VerifyResult> {
       return {
         status: "cannot_pay",
         detail: withRouterText("the key works, but the account can't pay for searches (HTTP 402)", await routerText(response)) +
-          `. Add funds at ${CONSOLE_URL}`,
+          `. Add funds at ${consoleUrlFor(input.baseUrl)}`,
       }
     }
     if (response.status === 403) {

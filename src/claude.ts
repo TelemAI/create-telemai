@@ -40,6 +40,8 @@
 
 import { join } from "node:path"
 
+import { CONSOLE_URL } from "./credentials.ts"
+
 /** The plugin package's own name (`.claude-plugin/plugin.json` → name). */
 export const CLAUDE_PLUGIN = "telem"
 /** The bundled marketplace's name (`.claude-plugin/marketplace.json` → name). */
@@ -84,7 +86,7 @@ export const CLAUDE_PLUGIN_MANIFEST = ".claude-plugin/plugin.json"
  * source is not a JSON object with a `mcpServers.telem` object: the caller then copies
  * it as it is and says the endpoint could not be set.
  */
-export function claudePluginManifestFor(source: string, mcpUrl: string): string | null {
+export function claudePluginManifestFor(source: string, mcpUrl: string, consoleUrl: string = CONSOLE_URL): string | null {
   let parsed: unknown
   try {
     parsed = JSON.parse(source.replace(/^\uFEFF/, ""))
@@ -93,8 +95,13 @@ export function claudePluginManifestFor(source: string, mcpUrl: string): string 
   }
   const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v)
   if (!isObj(parsed) || !isObj(parsed.mcpServers) || !isObj(parsed.mcpServers.telem)) return null
-  if (parsed.mcpServers.telem.url === mcpUrl) return source
+  // The key prompt names the console to get a key from: the deployment's own (consoleUrlFor).
+  const keyConfig = isObj(parsed.userConfig) && isObj(parsed.userConfig.TELEM_API_KEY) ? parsed.userConfig.TELEM_API_KEY : null
+  const prompt = typeof keyConfig?.description === "string" ? keyConfig.description : null
+  const nextPrompt = prompt?.replaceAll(CONSOLE_URL, consoleUrl) ?? null
+  if (parsed.mcpServers.telem.url === mcpUrl && nextPrompt === prompt) return source
   parsed.mcpServers.telem.url = mcpUrl
+  if (keyConfig && nextPrompt !== null) keyConfig.description = nextPrompt
   const indent = /^[ \t]+(?=")/m.exec(source)?.[0] ?? "  "
   // Keep the source's line endings too: a Windows checkout (git autocrlf) has CRLF.
   // JSON.stringify escapes newlines inside strings, so only structural ones change.

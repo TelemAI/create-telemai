@@ -138,7 +138,7 @@ import {
   installedCodexPluginVersion,
 } from "./codex-plugin.ts"
 import {
-  CONSOLE_URL,
+  consoleUrlFor,
   DEFAULT_BASE_URL,
   credentialsContents,
   maskKey,
@@ -162,6 +162,7 @@ import type { InstallErrorContext } from "./errors.ts"
 import { failureLine, translateInstallError } from "./errors.ts"
 import type { Flags } from "./flags.ts"
 import { HELP_TEXT, ignoredInteractiveFlags, missingRequiredFlags, parseFlags } from "./flags.ts"
+import { CREATE_COMMAND, NPX_COMMAND, type Preset, withPreset } from "./preset.ts"
 import { SUGGESTIONS } from "./interview.ts"
 import { findLegacyFiles, legacyWarnings } from "./legacy.ts"
 import { pickOpencodeConfigPath, planOpencodePlugin } from "./opencode.ts"
@@ -214,6 +215,11 @@ export type Ports = {
   openUrl: (argv: string[]) => void
   fetchImpl: typeof fetch
   loadUi: () => Promise<Ui>
+  /**
+   * The deployment this build defaults to (preset.ts): set by index.ts in a preset
+   * build such as `@telemai/create-hack`, absent in `@telemai/create`.
+   */
+  preset?: Preset
   /**
    * Absolute path to the the sibling plugin source the Claude Code planner
    * copies to `~/.telem/plugins/claude-plugin-telem` and registers from there (never
@@ -332,7 +338,9 @@ function commitEpilogue(progress: CommitProgress): string {
 
 export async function run(ports: Ports): Promise<number> {
   const parsed = parseFlags(ports.argv)
-  const flags = parsed.flags
+  // A preset build (`@telemai/create-hack`) runs as if its two urls were passed as
+  // flags, unless the user passed them (preset.ts).
+  const flags = withPreset(parsed.flags, ports.preset)
 
   if (flags.help) {
     ports.stdout(HELP_TEXT)
@@ -348,7 +356,7 @@ export async function run(ports: Ports): Promise<number> {
     return fail(ports, flags, {
       code: "bad-flags",
       message: parsed.errors.join("; "),
-      remedy: "run `npx @telemai/create --help` for the full flag list",
+      remedy: `run \`${NPX_COMMAND} --help\` for the full flag list`,
     })
   }
 
@@ -529,6 +537,7 @@ async function drive(
     // keeps its own url, and the run says so (`noteKept`).
     savedApiKey: existingCredentials.apiKey,
     repointKeyed: flags.mcpUrl !== undefined || savedMcpUrl !== undefined,
+    consoleUrl: consoleUrlFor(baseUrl),
   }
   const mcpUrlWrite: string | null | undefined =
     mcp.url !== HOSTED_MCP_URL ? mcp.url : flags.mcpUrl !== undefined ? null : undefined
@@ -834,7 +843,7 @@ async function drive(
  * way to add another, since a GUI app that is not on PATH is not detected.
  */
 function onlyHost(surface: Surface, say: (line: string) => void): SurfaceId[] {
-  say(`Installing into ${appName(surface.label)}. To add other tools: npx @telemai/create --client <name>`)
+  say(`Installing into ${appName(surface.label)}. To add other tools: ${NPX_COMMAND} --client <name>`)
   return [surface.id]
 }
 
@@ -914,6 +923,9 @@ type McpTarget = {
   /** The url Claude Code's telem plugin points at after this run, set by its planner
    * (undefined when nothing was installed). */
   claudeUrl?: string | null
+  /** The console that issues keys for this deployment (consoleUrlFor), which the Claude
+   * Code plugin's key prompt names when its manifest is repointed. */
+  consoleUrl: string
 }
 
 /**
@@ -1081,7 +1093,7 @@ async function planSurfaces(
         })
         plan.notes.push(
           `Installing uv now. The Python surfaces (the Claude Agent Skill) need ${PYTHON_PACKAGE}, which uv then installs — ` +
-            `re-run \`npm create @telemai\` after this to finish them (this run installs uv; the next detects it).`,
+            `re-run \`${CREATE_COMMAND}\` after this to finish them (this run installs uv; the next detects it).`,
         )
         plan.warnings.push(
           `${PYTHON_PROBE} is not installed yet; the Python surfaces finish on a re-run, once uv has installed ${PYTHON_PACKAGE}`,
@@ -1264,7 +1276,7 @@ async function planClaudeCode(
   const copyDir = claudePluginCopyDir(home)
   // Only an installer run makes the copy, so the hand-run advice is the installer itself,
   // never `marketplace add` of a folder that does not exist yet (or of the npx cache).
-  const rerun = ["npx", "@telemai/create", "--client", "claude-code"]
+  const rerun = [...NPX_COMMAND.split(" "), "--client", "claude-code"]
 
   // A plugin with no key cannot authenticate, and that is just as true on the two
   // guided paths below — which is where the warning used to be unreachable, because it
@@ -1272,7 +1284,7 @@ async function planClaudeCode(
   // hand and never told the key was missing from the config those commands read.
   if (!apiKey) {
     plan.warnings.push(
-      "the telem Claude plugin has no key yet; add one with `npx @telemai/create --login`",
+      `the telem Claude plugin has no key yet; add one with \`${NPX_COMMAND} --login\``,
     )
   }
 
@@ -1292,7 +1304,7 @@ async function planClaudeCode(
     plan.notes.push(
       surfaceNote(
         "claude-code",
-        `${why}, so this was not installed. Re-run with the published \`npx @telemai/create\`, ` +
+        `${why}, so this was not installed. Re-run with the published \`${NPX_COMMAND}\`, ` +
           `or point TELEM_CLAUDE_PLUGIN_DIR at a claude-plugin-telem folder and run:\n\n    ${rerun.join(" ")}`,
       ),
     )
@@ -1435,7 +1447,7 @@ async function planClaudeCode(
     let contents = file.contents as string
     let repointed = false
     if (file.relative === CLAUDE_PLUGIN_MANIFEST && mcp.url !== HOSTED_MCP_URL) {
-      const manifest = claudePluginManifestFor(contents, mcp.url)
+      const manifest = claudePluginManifestFor(contents, mcp.url, mcp.consoleUrl)
       if (manifest === null) {
         plan.warnings.push(
           `the telem plugin's ${CLAUDE_PLUGIN_MANIFEST} has no mcpServers.telem to point at ${mcp.url}; ` +
@@ -1637,7 +1649,7 @@ async function planMuse(
 
   if (!hookFound) {
     const reason = "the telem hook and skill were not found in this package, so searches are not recorded with lineage or reasoning"
-    plan.notes.push(surfaceNote("muse", `${reason}. Re-run with the published \`npx @telemai/create\`.`))
+    plan.notes.push(surfaceNote("muse", `${reason}. Re-run with the published \`${NPX_COMMAND}\`.`))
     setOutcome(plan, "muse", "partial", changes.length ? `${changes.join("; ")}; ${reason}` : reason)
     return
   }
@@ -1796,7 +1808,7 @@ function planEditorAgent(
 
   if (!hookFound) {
     const reason = "the telem hook and skill were not found in this package, so searches carry no lineage"
-    plan.notes.push(surfaceNote(id, `${reason}. Re-run with the published \`npx @telemai/create\`.`))
+    plan.notes.push(surfaceNote(id, `${reason}. Re-run with the published \`${NPX_COMMAND}\`.`))
     setOutcome(plan, id, "partial", changes.length ? `${changes.join("; ")}; ${reason}` : reason)
     return
   }
@@ -1926,7 +1938,7 @@ function planCopilot(
 
   if (!pluginFound) {
     const reason = "the telem plugin was not found in this package, so searches carry no lineage and Copilot gets no skill"
-    plan.notes.push(surfaceNote("vscode", `${reason}. Re-run with the published \`npx @telemai/create\`.`))
+    plan.notes.push(surfaceNote("vscode", `${reason}. Re-run with the published \`${NPX_COMMAND}\`.`))
     setOutcome(plan, "vscode", "partial", changes.length ? `${changes.join("; ")}; ${reason}` : reason)
     return
   }
@@ -2363,7 +2375,7 @@ async function planGrok(
   if (hookReason) {
     const next = hookReason.endsWith("re-run the installer")
       ? `${hookReason}.`
-      : `${hookReason}. Re-run with the published \`npx @telemai/create\`.`
+      : `${hookReason}. Re-run with the published \`${NPX_COMMAND}\`.`
     plan.notes.push(surfaceNote("grok", next))
     setOutcome(plan, "grok", "partial", changes.length ? `${changes.join("; ")}; ${hookReason}` : hookReason)
     return
@@ -2442,7 +2454,7 @@ async function planCodexPlugin(
   // reasoning capture silently dead.
   if (!codex || !pluginDir || !ports.exists(pluginDir)) {
     const rerunInstead =
-      "(or just re-run `npm create @telemai` once it is there — that run also pre-grants the hook's trust, " +
+      `(or just re-run \`${CREATE_COMMAND}\` once it is there — that run also pre-grants the hook's trust, ` +
       "which the two commands above do not.)"
     const blocked = !codex
       ? {
@@ -2824,16 +2836,16 @@ function planClaudeSkill(plan: Plan, tools: Record<string, ToolInfo>): void {
 const NO_KEY_SAVED = {
   rejected:
     "no API key was saved (the key you entered was rejected) — Telem search will not work until you add one. " +
-    "Run `npx @telemai/create --login`.",
+    `Run \`${NPX_COMMAND} --login\`.`,
   // The same outcome reached without the user typing anything: the key ALREADY on this
   // machine is the one the server refused. "the key you entered" named a key that was
   // never entered, which reads as a typo the user could go back and fix.
   rejectedExisting:
     "no API key was saved (the key on this machine was rejected by the server) — " +
-    "Telem search will not work until you add one. Run `npx @telemai/create --login`.",
+    `Telem search will not work until you add one. Run \`${NPX_COMMAND} --login\`.`,
   declined:
     "no API key was saved — Telem search will not work until you add one. " +
-    "Run `npx @telemai/create --login`.",
+    `Run \`${NPX_COMMAND} --login\`.`,
 } as const
 
 /**
@@ -2952,10 +2964,13 @@ const KEY_CHOICE = {
   initialValue: "paste",
 }
 
-/** Shown on "create", just before the browser is opened. The URL is a constant, never input. */
-const CREATE_KEY_NOTE =
-  `Opening ${CONSOLE_URL} — open your project, then API keys, then Issue API key. Paste the new key here. ` +
-  "A new key starts with no searches, sessions or monitors of its own."
+/** Shown on "create", just before the browser is opened. */
+function createKeyNote(consoleUrl: string): string {
+  return (
+    `Opening ${consoleUrl} — open your project, then API keys, then Issue API key. Paste the new key here. ` +
+    "A new key starts with no searches, sessions or monitors of its own."
+  )
+}
 
 type CredentialOutcome = {
   apiKey?: string
@@ -2969,7 +2984,7 @@ type CredentialOutcome = {
 const UNKNOWN_CREDENTIAL_ERROR: RunError = {
   code: "credentials",
   message: "the API key could not be resolved",
-  remedy: "run `npx @telemai/create --login` to enter a key",
+  remedy: `run \`${NPX_COMMAND} --login\` to enter a key`,
 }
 
 /**
@@ -3012,7 +3027,7 @@ async function checkExistingKey(
   const apiKey = context.existing.apiKey as string
   const verified = await verifyWithSpinner(ports, ui, context.baseUrl, apiKey)
   if (verified.status === "ok") {
-    context.say(`Using your saved Telem key (${maskKey(apiKey)}). To use a different key: npx @telemai/create --login`)
+    context.say(`Using your saved Telem key (${maskKey(apiKey)}). To use a different key: ${NPX_COMMAND} --login`)
     return { status: "kept" }
   }
   if (verified.status === "cannot_pay" || verified.status === "refused") {
@@ -3023,7 +3038,7 @@ async function checkExistingKey(
     context.plan.warnings.push(
       verified.status === "cannot_pay"
         ? verified.detail
-        : `${verified.detail} — the key was kept. If it has no Telem Search, create one that does at ${CONSOLE_URL} and run npx @telemai/create --login`,
+        : `${verified.detail} — the key was kept. If it has no Telem Search, create one that does at ${consoleUrlFor(context.baseUrl)} and run ${NPX_COMMAND} --login`,
     )
     return { status: "kept" }
   }
@@ -3124,9 +3139,10 @@ async function resolveCredential(
     // (`say` does it, the summary does it): three raw 40-character $HOME prefixes stack
     // up in the one note the user is meant to read carefully before pasting a secret.
     const targets = context.keyFiles
+    const consoleUrl = consoleUrlFor(context.baseUrl)
     if (context.retry) {
       ui.note(
-        `Paste another key from ${CONSOLE_URL} — same rules, and the same ` +
+        `Paste another key from ${consoleUrl} — same rules, and the same ` +
           `${targets.length === 1 ? "file" : `${targets.length} files`} listed above.`,
         "API key",
       )
@@ -3134,7 +3150,7 @@ async function resolveCredential(
       // Two lines (owner, 2026-11-03: keep it simple). Which files hold the key is in
       // the summary's "Wrote" list, path by path; the note says where and who can read it.
       ui.note(
-        `Create a key at ${CONSOLE_URL} (your project, then "API keys") and paste it below.\n` +
+        `Create a key at ${consoleUrl} (your project, then "API keys") and paste it below.\n` +
           `It stays hidden, and it is saved only on this computer, readable only by you (${
             targets.length === 1 ? "one file" : `${targets.length} files`
           }, listed at the end). Leave it empty to skip.`,
@@ -3145,11 +3161,12 @@ async function resolveCredential(
     // thing only (paste another key), so it skips the choice.
     const choice = context.retry ? "paste" : await ui.select(KEY_CHOICE)
     if (choice === "create") {
-      ui.note(CREATE_KEY_NOTE, "API key")
-      // One argument per element, no shell, and the URL is our own constant. A failure
-      // to open is ignored: the note above prints the URL.
+      ui.note(createKeyNote(consoleUrl), "API key")
+      // One argument per element, no shell, and the URL is a parsed URL's origin or our
+      // own constant (consoleUrlFor). A failure to open is ignored: the note above
+      // prints the URL.
       try {
-        ports.openUrl(openUrlArgv(ports.platform, CONSOLE_URL))
+        ports.openUrl(openUrlArgv(ports.platform, consoleUrl))
       } catch {
         // ignored, see above
       }
@@ -3179,14 +3196,14 @@ async function resolveCredential(
         // user with no key by definition has not exported one, so the installer's own
         // remedy exited 1 for exactly the user it was aimed at. --key-env stays the
         // documented CI form; it is not the thing to tell a human to run.
-        "no key configured yet — add one any time with: npx @telemai/create --login"
+        `no key configured yet — add one any time with: ${NPX_COMMAND} --login`
     context.say(message)
     // Not "unauthenticated" — that reads as degraded-but-working. Against the hosted
     // router an unauthenticated search is a 401: nothing works at all.
     if (!context.existing.apiKey) {
       context.plan.warnings.push(
         "no API key configured — Telem search will be rejected until you add one. " +
-          "Add one any time with: npx @telemai/create --login",
+          `Add one any time with: ${NPX_COMMAND} --login`,
       )
     }
     return { status: context.existing.apiKey ? "kept" : "absent" }
@@ -3223,7 +3240,7 @@ async function resolveCredential(
       error: {
         code: "key-rejected",
         message: verified.detail,
-        remedy: `create a fresh key under "API keys" at ${CONSOLE_URL} and re-run`,
+        remedy: `create a fresh key under "API keys" at ${consoleUrlFor(context.baseUrl)} and re-run`,
       },
     }
   }
@@ -3525,11 +3542,11 @@ function loginOutro(credential: CredentialOutcome, credsPath: string): string {
     case "kept":
       return `No new key was entered; the one already in ${credsPath} was kept.`
     case "rejected":
-      return "No key was saved — the one you entered was rejected. Run `npx @telemai/create --login` to try another."
+      return `No key was saved — the one you entered was rejected. Run \`${NPX_COMMAND} --login\` to try another.`
     case "unverified-declined":
       return "No key was saved — you chose not to write it without a successful check."
     default:
-      return "No key was saved — nothing was entered. Run `npx @telemai/create --login` when you have one."
+      return `No key was saved — nothing was entered. Run \`${NPX_COMMAND} --login\` when you have one.`
   }
 }
 
@@ -3687,7 +3704,7 @@ function nextStepLines(flags: Flags, summary: Summary): string[] {
     )
   }
   steps.push("Ask it to search for something — Telem handles the search.")
-  steps.push(`Watch the searches land at ${CONSOLE_URL}`)
+  steps.push(`Watch the searches land at ${consoleUrlFor(summary.baseUrl)}`)
   return steps
 }
 

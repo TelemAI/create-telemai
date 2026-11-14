@@ -6,6 +6,7 @@
 // the caller can print all of them at once instead of one per run.
 
 import { mcpUrlProblem } from "./credentials.ts"
+import { BUILD_PRESET, CREATE_COMMAND, NPX_COMMAND, PACKAGE_NAME } from "./preset.ts"
 import { OFF_VALUE, SUGGESTIONS } from "./interview.ts"
 import type { SurfaceId } from "./surfaces.ts"
 import { SURFACE_ALIASES, SURFACE_IDS } from "./surfaces.ts"
@@ -262,17 +263,24 @@ export function ignoredInteractiveFlags(flags: Flags): string[] {
   return ignored
 }
 
-export const HELP_TEXT = `create-telemai — set up Telem web search in your coding agents
+export const HELP_TEXT = `${BUILD_PRESET ? PACKAGE_NAME : "create-telemai"} — set up Telem web search in your coding agents
 
 Telem routes your agent's web searches through one API across nine search
 providers, and records what it searched. This installer finds the agents you have,
 takes your API key, and wires Telem into each one you pick.
-
+${
+  BUILD_PRESET
+    ? `
+This build sets up ${BUILD_PRESET.baseUrl} (MCP: ${BUILD_PRESET.mcpUrl}).
+--base-url and --mcp-url still override it.
+`
+    : ""
+}
 Usage:
-  npm create @telemai                              interactive
-  npm create @telemai -- --yes --client opencode   non-interactive
-  npx @telemai/create --login                      add or replace your API key (prompts)
-  npx @telemai/create --login --key-env TELEM_API_KEY   the same, from the environment
+  ${CREATE_COMMAND.padEnd(48)} interactive
+  ${`${CREATE_COMMAND} -- --yes --client opencode`.padEnd(48)} non-interactive
+  ${`${NPX_COMMAND} --login`.padEnd(48)} add or replace your API key (prompts)
+  ${NPX_COMMAND} --login --key-env TELEM_API_KEY   the same, from the environment
 
 Flags (they double as the non-interactive API):
   --yes, -y                     never prompt: run from flags only (it still needs
