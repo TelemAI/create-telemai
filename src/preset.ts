@@ -18,9 +18,10 @@ export type Preset = {
 }
 
 export const PRESETS: Record<string, Preset> = {
-  // The hackathon stack: the console, the API and the MCP server on one host.
-  hack: {
-    name: "hack",
+  // The hackathon stack: the console, the API and the MCP server on one host. Named
+  // "event" because npm refuses package names with "hack" in them.
+  event: {
+    name: "event",
     baseUrl: "https://hack.telem.ai/api",
     mcpUrl: "https://hack.telem.ai/mcp",
   },

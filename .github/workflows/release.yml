@@ -1,4 +1,4 @@
-# Publish to npm when a version tag is pushed: @telemai/create, and @telemai/create-hack
+# Publish to npm when a version tag is pushed: @telemai/create, and @telemai/create-event
 # (the same build with the hackathon stack as its default, scripts/hack-package.mjs) at
 # the same version.
 #
@@ -50,7 +50,7 @@ jobs:
       # its version goes to `next` instead, which is what makes a release rehearsal
       # safe: it publishes for real, and nobody gets it by accident.
       #
-      # Two packages, one tag. @telemai/create-hack goes first: a token that cannot
+      # Two packages, one tag. @telemai/create-event goes first: a token that cannot
       # create that name then fails the run before @telemai/create is out. A version
       # already on the registry is skipped rather than failed, so a re-run after a
       # half-failed release publishes the rest.

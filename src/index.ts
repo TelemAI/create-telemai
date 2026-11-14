@@ -19,7 +19,7 @@ import { BUILD_PRESET } from "./preset.ts"
 import { run } from "./run.ts"
 import { loadClackUi } from "./ui.ts"
 
-export const VERSION = "0.1.32"
+export const VERSION = "0.1.33"
 
 /** Where `scripts/copy-plugins.mjs` puts the plugin packages inside this one. */
 export const PACKAGED_PLUGINS_DIR = "plugins"

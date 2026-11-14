@@ -217,7 +217,7 @@ export type Ports = {
   loadUi: () => Promise<Ui>
   /**
    * The deployment this build defaults to (preset.ts): set by index.ts in a preset
-   * build such as `@telemai/create-hack`, absent in `@telemai/create`.
+   * build such as `@telemai/create-event`, absent in `@telemai/create`.
    */
   preset?: Preset
   /**
@@ -338,7 +338,7 @@ function commitEpilogue(progress: CommitProgress): string {
 
 export async function run(ports: Ports): Promise<number> {
   const parsed = parseFlags(ports.argv)
-  // A preset build (`@telemai/create-hack`) runs as if its two urls were passed as
+  // A preset build (`@telemai/create-event`) runs as if its two urls were passed as
   // flags, unless the user passed them (preset.ts).
   const flags = withPreset(parsed.flags, ports.preset)
 

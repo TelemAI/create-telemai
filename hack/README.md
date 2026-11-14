@@ -1,9 +1,9 @@
-# @telemai/create-hack
+# @telemai/create-event
 
 The Telem installer, set up for the Telem hackathon stack at `https://hack.telem.ai`.
 
 ```bash
-npm create @telemai/hack
+npm create @telemai/event
 ```
 
 It is the same installer as [`@telemai/create`](https://www.npmjs.com/package/@telemai/create),
@@ -20,6 +20,6 @@ A flag that you pass still wins. The installer saves the addresses in
 SDKs read the API address from there.
 
 Node 20 or later, and node, not bun. On Windows PowerShell, use
-`npx @telemai/create-hack`. Run it with `--help` for every flag.
+`npx @telemai/create-event`. Run it with `--help` for every flag.
 
 The hackathon docs are at <https://hack.telem.ai/doc>.

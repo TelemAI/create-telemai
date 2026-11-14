@@ -1,8 +1,8 @@
-// Stage `@telemai/create-hack` in ./hack-package, ready for `npm pack` or `npm publish`.
+// Stage `@telemai/create-event` in ./hack-package, ready for `npm pack` or `npm publish`.
 //
-// `npm create @telemai/hack` runs `@telemai/create-hack` (npm's rule: `npm init
+// `npm create @telemai/event` runs `@telemai/create-event` (npm's rule: `npm init
 // @usr/foo` -> `npm exec @usr/create-foo`). That package is THIS one, built with the
-// `hack` preset (src/preset.ts): the same sources, the same plugin copies, the Muse and
+// `event` preset (src/preset.ts): the same sources, the same plugin copies, the Muse and
 // Grok Build hooks, and a bundle whose `--base-url` and `--mcp-url` default to the
 // hackathon stack. Nothing here is a second copy of the installer to keep in step.
 //
@@ -24,15 +24,15 @@ export const STAGE = join(root, "hack-package")
 /** The hack package's manifest, from this package's own: same version, files and engines. */
 export function hackManifest(main) {
   return {
-    name: "@telemai/create-hack",
+    name: "@telemai/create-event",
     version: main.version,
     description:
-      "Guided installer for Telem web search, set up for the Telem hackathon stack at hack.telem.ai: npm create @telemai/hack.",
+      "Guided installer for Telem web search, set up for the Telem hackathon stack at hack.telem.ai: npm create @telemai/event.",
     type: main.type,
     license: main.license,
     publishConfig: { access: "public" },
     // ONE bin, named after the package's last segment, which is the bin npm exec runs.
-    bin: { "create-hack": "dist/index.js" },
+    bin: { "create-event": "dist/index.js" },
     main: main.main,
     exports: main.exports,
     files: main.files,
@@ -49,7 +49,7 @@ async function stage() {
 
   const build = spawnSync(
     process.execPath,
-    [join(root, "scripts", "build.mjs"), "--preset", "hack", "--outdir", join(STAGE, "dist")],
+    [join(root, "scripts", "build.mjs"), "--preset", "event", "--outdir", join(STAGE, "dist")],
     { stdio: "inherit" },
   )
   if (build.status !== 0) throw new Error("the hack build failed")
@@ -61,7 +61,7 @@ async function stage() {
   cpSync(join(root, "hack", "README.md"), join(STAGE, "README.md"))
   writeFileSync(join(STAGE, "package.json"), `${JSON.stringify(hackManifest(main), null, 2)}\n`)
   await assertShippable()
-  process.stdout.write(`staged @telemai/create-hack ${main.version} in ${STAGE}\n`)
+  process.stdout.write(`staged @telemai/create-event ${main.version} in ${STAGE}\n`)
 }
 
 /**
